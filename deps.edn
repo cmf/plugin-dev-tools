@@ -1,0 +1,6 @@
+{:deps       {babashka/fs          {:mvn/version "0.5.26"}
+              babashka/curl        {:git/url "https://github.com/babashka/babashka.curl"
+                                    :git/sha "2187f908c033da45978512979c53bb53321120ce"}
+              borkdude/rewrite-edn {:git/url "https://github.com/borkdude/rewrite-edn"
+                                    :git/sha "97b6493a7977c7130c3d66cd14fe6371f0537e6c"}}
+ :tools/usage {:ns-default plugin-dev-tools.core}}
