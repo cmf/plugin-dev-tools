@@ -11,7 +11,7 @@
 
 (defn kotlin-key? [key]
   (and (= "org.jetbrains.kotlin" (namespace key))
-       (or (#{"kotlin-serialization-compiler-plugin"} (name key))
+       (or (= "kotlin-serialization-compiler-plugin" (name key))
            (str/starts-with? (name key) "kotlin-test")
            (str/starts-with? (name key) "kotlin-stdlib")
            (str/starts-with? (name key) "kotlin-reflect")
@@ -61,3 +61,12 @@
                       nodes
                       (keys (:aliases edn)))]
     (spit file-name (str nodes))))
+
+(comment
+  (let [config (edn/read-string (slurp "/Users/colin/dev/scribe/plugin.edn"))
+        versions (select-keys config [:kotlin-version :serialization-version :coroutines-version :ksp-version])
+        deps-edn-string (slurp "/Users/colin/dev/scribe/deps.edn")
+        nodes (rewrite/parse-string deps-edn-string)
+        edn (edn/read-string deps-edn-string)
+        nodes (update-deps-map nodes edn [:aliases :build :deps] versions)]
+    (cursive/diff deps-edn-string (str nodes))))

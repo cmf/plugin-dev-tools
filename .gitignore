@@ -1,3 +1,7 @@
 /.cpcache
 /.clj-kondo
 /plugin-dev-tools.iml
+/.scribe/conversations
+.nrepl-port
+test/fixtures
+.idea/libraries/

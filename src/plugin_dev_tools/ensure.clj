@@ -4,7 +4,8 @@
             [borkdude.rewrite-edn :as rewrite]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.java.shell :refer [sh]])
+            [clojure.java.shell :refer [sh]]
+            [clojure.string :as str])
   (:import (java.io File)))
 
 (defn sdks-dir []
@@ -24,6 +25,41 @@
        "/ideaIU-"
        version
        ".zip"))
+
+(defn process-sdk
+  "Extracts SDK from zipfile and generates deps.edn files for SDK and plugins.
+  This function is separated for testing purposes."
+  [version]
+  (println "Unzipping SDK")
+  (let [sdk (.getAbsolutePath (io/file (sdks-dir) version))
+        ret (sh "/usr/bin/unzip" (.getAbsolutePath (zipfile version)) "-d" sdk)]
+    (if (not= 0 (:exit ret))
+      (throw (ex-info "Problem unzipping" ret)))
+    ; Make some things executable that need to be
+    (sh "/bin/chmod" "+x" (str sdk "/bin/mac/aarch64/fsnotifier"))
+    (sh "/bin/chmod" "+x" (str sdk "/bin/mac/aarch64/printenv"))
+
+    ; Generate deps.edn files for the SDK itself and for each plugin
+    (let [sdk-file (io/file (sdks-dir) version)
+          aliases '{:aliases {:no-clojure {:classpath-overrides {org.clojure/clojure          ""
+                                                                 org.clojure/spec.alpha       ""
+                                                                 org.clojure/core.specs.alpha ""}}
+                              :test       {:extra-paths []}}}
+          jars (->> (fs/glob sdk-file "lib/**.jar")
+                    ; Remove annotations jar due to weird version conflict
+                    (remove #(= (fs/file-name %) "annotations.jar"))
+                    (map #(fs/relativize sdk-file %))
+                    (mapv str))]
+      (spit (io/file sdk-file "deps.edn") (pr-str (merge aliases {:paths jars})))
+      (let [plugins (fs/glob sdk-file "plugins/*")]
+        (doseq [plugin plugins]
+          (when (fs/directory? plugin)
+            (let [jars (->> (fs/glob plugin "lib/**.jar")
+                            ; Remove JPS plugins due to another weird version conflict in Kotlin
+                            (remove #(str/includes? (fs/file-name %) "jps-plugin"))
+                            (map #(fs/relativize plugin %))
+                            (mapv str))]
+              (spit (str plugin "/deps.edn") (pr-str (merge aliases {:paths jars}))))))))))
 
 (defn download-sdk [version]
   (let [url (sdk-url "releases" version)]
@@ -59,14 +95,7 @@
             (io/copy (:body resp) (sources-file version))
             @(:exit resp)))))
 
-    (println "Unzipping SDK")
-    (let [sdk (.getAbsolutePath (io/file (sdks-dir) version))
-          ret (sh "/usr/bin/unzip" (.getAbsolutePath (zipfile version)) "-d" sdk)]
-      (if (not= 0 (:exit ret))
-        (throw (ex-info "Problem unzipping" ret)))
-      ; Make some things executable that need to be
-      (sh "/bin/chmod" "+x" (str sdk "/bin/mac/aarch64/fsnotifier"))
-      (sh "/bin/chmod" "+x" (str sdk "/bin/mac/aarch64/printenv")))))
+    (process-sdk version)))
 
 (defn update-deps-edn [file-name version]
   (let [deps-edn-string (slurp file-name)
@@ -96,3 +125,6 @@
                       nodes
                       [:sdk :ide])]
     (spit file-name (str nodes))))
+
+(comment
+  (update-deps-edn "/Users/colin/dev/scribe/integrations/cursive/deps.edn" "253.20558.43-EAP-SNAPSHOT"))
