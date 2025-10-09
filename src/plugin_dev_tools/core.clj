@@ -11,7 +11,7 @@
     (let [config (edn/read-string (slurp "plugin.edn"))
           versions (select-keys config [:kotlin-version :serialization-version :coroutines-version :ksp-version])]
       ; Now update deps.edn files
-      (for [module (:modules config)]
+      (doseq [module (:modules config)]
         (kotlin/update-deps-edn module versions)))
     (catch Exception e
       (println (str "Error: "
@@ -22,16 +22,20 @@
 (defn ensure-sdk [args]
   (try
     (let [config (edn/read-string (slurp "plugin.edn"))
-          version (:idea-version config)
-          sdk (io/file (ensure/sdks-dir) version)]
+          marketing-version (:idea-version config)
+          ; Resolve version early to check if SDK exists
+          resolved-version (if (re-matches #"^\d{4}\.\d+(-eap)?$" marketing-version)
+                             (ensure/resolve-idea-version marketing-version)
+                             marketing-version)  ; Already a full version
+          sdk (io/file (ensure/sdks-dir) resolved-version)]
 
       ; Download SDK if not present (this also processes and generates deps.edn files)
       (when-not (fs/exists? sdk)
-        (ensure/download-sdk version))
+        (ensure/download-sdk marketing-version))
 
-      ; Now update deps.edn file
-      (for [module (:modules config)]
-        (ensure/update-deps-edn module version)))
+      ; Now update deps.edn file with resolved version
+      (doseq [module (:modules config)]
+        (ensure/update-deps-edn module resolved-version)))
     (catch Exception e
       (println (str "Error: "
                     (.getMessage e)

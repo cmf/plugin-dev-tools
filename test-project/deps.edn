@@ -1,0 +1,4 @@
+{:deps    {}
+ :aliases {:sdk   {:extra-deps {intellij/sdk {:local/root "/Users/colin/.sdks/253.20558.43-EAP-SNAPSHOT"}}}
+           :tools {:deps       {plugin/tools {:local/root ".."}}
+                   :ns-default plugin-dev-tools.core}}}

@@ -12,6 +12,7 @@
     <option name="projectFiles">
       <set>
         <option value="file://$PROJECT_DIR$/deps.edn" />
+        <option value="file://$PROJECT_DIR$/test-project/deps.edn" />
       </set>
     </option>
   </component>

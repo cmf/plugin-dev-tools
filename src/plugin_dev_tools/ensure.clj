@@ -5,7 +5,8 @@
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.java.shell :refer [sh]]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [clojure.xml :as xml])
   (:import (java.io File)))
 
 (defn sdks-dir []
@@ -25,6 +26,108 @@
        "/ideaIU-"
        version
        ".zip"))
+
+(defn maven-metadata-url [repo]
+  (str "https://www.jetbrains.com/intellij-repository/"
+       repo
+       "/com/jetbrains/intellij/idea/ideaIU/maven-metadata.xml"))
+
+(defn marketing-version->branch
+  "Convert marketing version to branch number (e.g., '2025.3' -> '253')"
+  [version]
+  (let [[year minor] (str/split version #"\.")]
+    (str "2" (mod (parse-long year) 10) minor)))
+
+(defn parse-maven-metadata
+  "Parse maven-metadata.xml and return map with :latest and :versions"
+  [xml-input-stream]
+  (try
+    (let [metadata (xml/parse xml-input-stream)
+          versioning (->> (:content metadata)
+                          (filter #(= :versioning (:tag %)))
+                          first)
+          latest (->> (:content versioning)
+                      (filter #(= :latest (:tag %)))
+                      first
+                      :content
+                      first)
+          versions-element (->> (:content versioning)
+                                (filter #(= :versions (:tag %)))
+                                first)
+          versions (->> (:content versions-element)
+                        (filter #(= :version (:tag %)))
+                        (map #(first (:content %)))
+                        vec)]
+      {:latest latest
+       :versions versions})
+    (catch Exception e
+      (println "Error parsing maven metadata:" (.getMessage e))
+      {:latest nil
+       :versions []})))
+
+(defn version-compare
+  "Compare two version strings semantically (e.g., '2024.3.10' > '2024.3.9')"
+  [v1 v2]
+  (let [parts1 (mapv parse-long (str/split v1 #"\."))
+        parts2 (mapv parse-long (str/split v2 #"\."))]
+    (compare parts1 parts2)))
+
+(defn resolve-release-version
+  "Find exact match or latest point release for the given version.
+  If point releases exist (e.g., 2025.2.1, 2025.2.3), returns the latest.
+  Otherwise returns the exact match or the version as-is.
+  Example: '2025.2' -> '2025.2.3' (if 2025.2.3 is the latest point release)"
+  [marketing-version versions]
+  (let [prefix-matches (->> versions
+                            (filter #(str/starts-with? % (str marketing-version ".")))
+                            (sort version-compare)
+                            reverse)
+        exact-match (some #(when (= % marketing-version) %) versions)]
+    (or (first prefix-matches)  ; Prefer latest point release if it exists
+        exact-match              ; Otherwise use exact match
+        marketing-version)))     ; Fall back to version as-is
+
+(defn resolve-eap-version
+  "Convert marketing version to branch and find latest snapshot.
+  Example: '2025.3' -> '253.25908.13-EAP-SNAPSHOT'"
+  [marketing-version versions]
+  (let [branch (marketing-version->branch marketing-version)
+        branch-pattern (re-pattern (str "^" branch "\\.\\d+.*-EAP-SNAPSHOT$"))
+        eap-versions (->> versions
+                          (filter #(re-matches branch-pattern %))
+                          (filter #(not (str/includes? % "CANDIDATE")))
+                          (sort)
+                          reverse)]
+    (or (first eap-versions)
+        (str branch "-EAP-SNAPSHOT"))))
+
+(defn resolve-idea-version
+  "Resolve marketing version to full version by fetching maven-metadata.xml.
+  For release versions (e.g., '2025.2'), finds the exact or latest point release.
+  For EAP versions (e.g., '2025.3-eap'), converts to branch and finds latest snapshot."
+  [marketing-version]
+  (let [is-eap? (str/ends-with? marketing-version "-eap")
+        repo (if is-eap? "snapshots" "releases")
+        clean-version (if is-eap?
+                        (str/replace marketing-version #"-eap$" "")
+                        marketing-version)
+        url (maven-metadata-url repo)]
+    (println "Resolving version" marketing-version "from" repo "repository")
+    (try
+      (let [resp (curl/get url {:as :stream :throw false})]
+        (if (= 200 (:status resp))
+          (let [{:keys [versions]} (parse-maven-metadata (:body resp))
+                resolved (if is-eap?
+                           (resolve-eap-version clean-version versions)
+                           (resolve-release-version clean-version versions))]
+            (println "Resolved" marketing-version "to" resolved)
+            resolved)
+          (do
+            (println "Warning: Could not fetch maven metadata (status" (:status resp) "), using version as-is")
+            marketing-version)))
+      (catch Exception e
+        (println "Warning: Error resolving version:" (.getMessage e) ", using version as-is")
+        marketing-version))))
 
 (defn process-sdk
   "Extracts SDK from zipfile and generates deps.edn files for SDK and plugins.
@@ -61,20 +164,17 @@
                             (mapv str))]
               (spit (str plugin "/deps.edn") (pr-str (merge aliases {:paths jars}))))))))))
 
-(defn download-sdk [version]
-  (let [url (sdk-url "releases" version)]
+(defn download-sdk
+  "Downloads SDK for the given marketing version. Returns the resolved full version."
+  [marketing-version]
+  (let [version (resolve-idea-version marketing-version)
+        repo (if (str/includes? version "SNAPSHOT") "snapshots" "releases")
+        url (sdk-url repo version)]
     (when-not (fs/exists? (sdks-dir))
       (fs/create-dir (sdks-dir)))
     (when-not (fs/exists? (zipfile version))
       (println "Downloading" url)
-      (let [[resp repo]
-            (let [resp (curl/get url {:as :stream :throw false})]
-              (if (= 200 (:status resp))
-                [resp "releases"]
-                [(let [url (sdk-url "snapshots" version)]
-                   (println "Not found (response" (:status resp) "), downloading" url)
-                   (curl/get url {:as :stream :throw false}))
-                 "snapshots"]))]
+      (let [resp (curl/get url {:as :stream :throw false})]
         (if (not= 200 (:status resp))
           (throw (ex-info "Problem downloading SDK" resp)))
         (io/copy (:body resp) (zipfile version))
@@ -95,7 +195,8 @@
             (io/copy (:body resp) (sources-file version))
             @(:exit resp)))))
 
-    (process-sdk version)))
+    (process-sdk version)
+    version))
 
 (defn update-deps-edn [file-name version]
   (let [deps-edn-string (slurp file-name)

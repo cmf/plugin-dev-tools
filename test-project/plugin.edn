@@ -1,0 +1,3 @@
+{:idea-version "253.20558.43-EAP-SNAPSHOT"
+ :kotlin-version "2.1.0"
+ :modules ["deps.edn"]}
