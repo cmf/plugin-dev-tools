@@ -2,7 +2,8 @@
   (:require [clojure.test :refer :all]
             [plugin-dev-tools.ensure :as ensure]
             [clojure.edn :as edn]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [babashka.fs :as fs])
   (:import (java.io File)))
 
 (deftest test-sdks-dir
@@ -287,3 +288,37 @@
           expected-plugin-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))]
       (is (= expected-sdk-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
       (is (= expected-plugin-path (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root]))))))
+
+(deftest test-process-plugin-with-nested-lib-directory
+  (testing "handles plugin with lib/ in subdirectory using fs/file with Path objects"
+    ;; This test verifies the fix for the UnixPath coercion bug
+    ;; Create a mock plugin directory structure with lib/ in a subdirectory
+    (let [test-plugin-dir (io/file "/tmp/test-plugin-nested")
+          plugin-subdir (io/file test-plugin-dir "plugin-name")
+          lib-dir (io/file plugin-subdir "lib")]
+
+      ;; Setup: Create directory structure
+      (fs/create-dirs lib-dir)
+      (spit (io/file lib-dir "test.jar") "mock jar content")
+
+      (try
+        ;; Test the logic that was buggy: fs/list-dir returns Path objects
+        ;; and we need to use fs/file (not io/file) to construct paths from them
+        (let [subdirs (filter fs/directory? (fs/list-dir test-plugin-dir))
+              ;; This would fail with io/file before the fix
+              found-lib-dir (first (filter #(fs/exists? (fs/file % "lib")) subdirs))]
+
+          ;; Verify we found the subdirectory with lib/
+          (is (not (nil? found-lib-dir)))
+          (is (fs/exists? (fs/file found-lib-dir "lib")))
+
+          ;; Verify we can write deps.edn using fs/file with Path object
+          (let [deps-edn-file (fs/file found-lib-dir "deps.edn")
+                deps-content {:paths ["lib/test.jar"]}]
+            (spit deps-edn-file (pr-str deps-content))
+            (is (fs/exists? deps-edn-file))
+            (is (= deps-content (edn/read-string (slurp deps-edn-file))))))
+
+        (finally
+          ;; Cleanup
+          (fs/delete-tree test-plugin-dir))))))

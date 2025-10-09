@@ -183,7 +183,7 @@
           ; If not, look for the first subdirectory that contains lib/
           actual-plugin-dir (if (fs/exists? lib-dir)
                               plugin-file
-                              (first (filter #(fs/exists? (io/file % "lib"))
+                              (first (filter #(fs/exists? (fs/file % "lib"))
                                            (filter fs/directory? (fs/list-dir plugin-file)))))
           aliases '{:aliases {:no-clojure {:classpath-overrides {org.clojure/clojure          ""
                                                                  org.clojure/spec.alpha       ""
@@ -194,7 +194,7 @@
                         (remove #(str/includes? (fs/file-name %) "jps-plugin"))
                         (map #(fs/relativize actual-plugin-dir %))
                         (mapv str))]
-          (spit (io/file actual-plugin-dir "deps.edn") (pr-str (merge aliases {:paths jars}))))))))
+          (spit (fs/file actual-plugin-dir "deps.edn") (pr-str (merge aliases {:paths jars}))))))))
 
 (defn download-plugin
   "Downloads a plugin from the JetBrains marketplace.
