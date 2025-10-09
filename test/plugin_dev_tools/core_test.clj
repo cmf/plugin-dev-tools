@@ -81,3 +81,29 @@
     ; We expect it to print an error but not crash
     ; Note: This will print an error message during test execution, which is expected
     (is (nil? (core/ensure-sdk [])))))
+
+(deftest test-ensure-sdk-with-marketplace-plugins
+  (testing "update-deps-edn updates both SDK and marketplace plugin paths"
+    ; This test verifies the integration with marketplace plugins
+    (let [module1 "/tmp/test-sdk-marketplace-deps.edn"
+          version "2023.1.1"
+          plugins [{:id "kotlin" :version "1.9.0"}
+                   {:id "org.intellij.plugins.markdown" :version "1.0.0"}]
+          module-content "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/sdk\"}
+                                                         marketplace-plugin/kotlin {:local/root \"/old/kotlin\"}
+                                                         marketplace-plugin/org.intellij.plugins.markdown {:local/root \"/old/markdown\"}}}}}"]
+
+      (spit module1 module-content)
+
+      (ensure/update-deps-edn module1 version plugins)
+
+      ; Verify both SDK and plugin paths were updated
+      (let [result (edn/read-string (slurp module1))
+            expected-sdk-path (.getAbsolutePath (io/file (ensure/sdks-dir) version))
+            expected-kotlin-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))
+            expected-markdown-path (.getAbsolutePath (ensure/plugin-dir "org.intellij.plugins.markdown" "1.0.0"))]
+        (is (= expected-sdk-path (get-in result [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
+        (is (= expected-kotlin-path (get-in result [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))
+        (is (= expected-markdown-path (get-in result [:aliases :sdk :extra-deps 'marketplace-plugin/org.intellij.plugins.markdown :local/root]))))
+
+      (io/delete-file module1))))

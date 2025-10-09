@@ -129,6 +129,105 @@
         (println "Warning: Error resolving version:" (.getMessage e) ", using version as-is")
         marketing-version))))
 
+;; Plugin-related functions
+
+(defn plugin-maven-url
+  "Construct Maven repository URL for a plugin.
+  Channel is optional. If provided, it's prepended to the group.
+  Examples:
+    (plugin-maven-url \"kotlin\" \"1.9.0\" nil)
+    => \"https://plugins.jetbrains.com/maven/com/jetbrains/plugins/kotlin/1.9.0/kotlin-1.9.0.zip\"
+    (plugin-maven-url \"kotlin\" \"1.9.0\" \"eap\")
+    => \"https://plugins.jetbrains.com/maven/eap/com/jetbrains/plugins/kotlin/1.9.0/kotlin-1.9.0.zip\""
+  [plugin-id version channel]
+  (let [channel-path (if channel (str channel "/") "")]
+    (str "https://plugins.jetbrains.com/maven/"
+         channel-path
+         "com/jetbrains/plugins/"
+         plugin-id
+         "/"
+         version
+         "/"
+         plugin-id
+         "-"
+         version
+         ".zip")))
+
+(defn plugin-dir
+  "Return the directory path for a downloaded plugin.
+  Plugins are stored in ~/.sdks/plugins/{plugin-id}/{version}/"
+  [plugin-id version]
+  (io/file (sdks-dir) "plugins" plugin-id version))
+
+(defn plugin-zipfile
+  "Return the path to the downloaded plugin zip file.
+  Example: ~/.sdks/plugins/kotlin/1.9.0/kotlin-1.9.0.zip"
+  [plugin-id version]
+  (io/file (plugin-dir plugin-id version) (str plugin-id "-" version ".zip")))
+
+(defn process-plugin
+  "Extracts plugin from zipfile and generates deps.edn file.
+  Similar to process-sdk but for marketplace plugins."
+  [plugin-id version]
+  (println "Unzipping plugin" plugin-id)
+  (let [plugin-path (.getAbsolutePath (plugin-dir plugin-id version))
+        zip-path (.getAbsolutePath (plugin-zipfile plugin-id version))
+        ret (sh "/usr/bin/unzip" "-q" zip-path "-d" plugin-path)]
+    (if (not= 0 (:exit ret))
+      (throw (ex-info "Problem unzipping plugin" ret)))
+
+    ; Find the actual plugin directory (it might be nested inside the zip)
+    (let [plugin-file (plugin-dir plugin-id version)
+          ; First check if there's a lib/ directory directly
+          lib-dir (io/file plugin-file "lib")
+          ; If not, look for the first subdirectory that contains lib/
+          actual-plugin-dir (if (fs/exists? lib-dir)
+                              plugin-file
+                              (first (filter #(fs/exists? (io/file % "lib"))
+                                           (filter fs/directory? (fs/list-dir plugin-file)))))
+          aliases '{:aliases {:no-clojure {:classpath-overrides {org.clojure/clojure          ""
+                                                                 org.clojure/spec.alpha       ""
+                                                                 org.clojure/core.specs.alpha ""}}
+                              :test       {:extra-paths []}}}]
+      (when actual-plugin-dir
+        (let [jars (->> (fs/glob actual-plugin-dir "lib/**.jar")
+                        (remove #(str/includes? (fs/file-name %) "jps-plugin"))
+                        (map #(fs/relativize actual-plugin-dir %))
+                        (mapv str))]
+          (spit (io/file actual-plugin-dir "deps.edn") (pr-str (merge aliases {:paths jars}))))))))
+
+(defn download-plugin
+  "Downloads a plugin from the JetBrains marketplace.
+  Takes a plugin spec map with :id, :version (optional), and :channel (optional).
+  Returns the plugin-id and version as a map."
+  [{:keys [id version channel] :as plugin-spec}]
+  (let [plugin-id id
+        ; If no version specified, we'll need to fetch it somehow
+        ; For now, require version to be specified
+        _ (when-not version
+            (throw (ex-info "Plugin version must be specified" {:plugin-id plugin-id})))
+        url (plugin-maven-url plugin-id version channel)
+        plugin-path (plugin-dir plugin-id version)
+        zip-path (plugin-zipfile plugin-id version)]
+
+    (when-not (fs/exists? plugin-path)
+      (fs/create-dirs plugin-path))
+
+    (when-not (fs/exists? zip-path)
+      (println "Downloading plugin" plugin-id version "from" url)
+      (let [resp (curl/get url {:as :stream :throw false})]
+        (if (not= 200 (:status resp))
+          (throw (ex-info "Problem downloading plugin"
+                         {:plugin-id plugin-id
+                          :version version
+                          :status (:status resp)
+                          :url url})))
+        (io/copy (:body resp) zip-path)
+        @(:exit resp)))
+
+    (process-plugin plugin-id version)
+    {:id plugin-id :version version}))
+
 (defn process-sdk
   "Extracts SDK from zipfile and generates deps.edn files for SDK and plugins.
   This function is separated for testing purposes."
@@ -198,34 +297,49 @@
     (process-sdk version)
     version))
 
-(defn update-deps-edn [file-name version]
-  (let [deps-edn-string (slurp file-name)
-        nodes (rewrite/parse-string deps-edn-string)
-        edn (edn/read-string deps-edn-string)
-        nodes (reduce (fn [nodes alias]
-                        (let [keys (filter #(#{"intellij" "plugin"} (namespace %))
-                                           (keys (get-in edn [:aliases alias :extra-deps])))]
-                          (reduce (fn [nodes key]
-                                    (let [target [:aliases alias :extra-deps key :local/root]]
-                                      (cond
-                                        (.endsWith (name key) "$sources")
-                                        (rewrite/assoc-in nodes target
-                                                          (.getAbsolutePath (io/file (sdks-dir) (str "ideaIC-" version "-sources.jar"))))
-                                        (= "intellij" (namespace key))
-                                        (rewrite/assoc-in nodes target
-                                                          (.getAbsolutePath (io/file (sdks-dir) version)))
-                                        (= "plugin" (namespace key))
-                                        (let [previous (get-in edn target)
-                                              file (io/file previous)
-                                              name (.getName file)]
-                                          (rewrite/assoc-in nodes target
-                                                            (.getAbsolutePath (io/file (sdks-dir) version "plugins" name))))
-                                        :else nodes)))
-                                  nodes
-                                  keys)))
-                      nodes
-                      [:sdk :ide])]
-    (spit file-name (str nodes))))
+(defn update-deps-edn
+  "Update deps.edn file with SDK and plugin paths.
+  version: The IntelliJ SDK version
+  plugins: Collection of plugin specs with :id and :version (optional, defaults to empty vector)"
+  ([file-name version]
+   (update-deps-edn file-name version []))
+  ([file-name version plugins]
+   (let [deps-edn-string (slurp file-name)
+         nodes (rewrite/parse-string deps-edn-string)
+         edn (edn/read-string deps-edn-string)
+         ; Create a map of plugin-id -> version for lookup
+         plugin-map (into {} (map (fn [{:keys [id version]}] [id version]) plugins))
+         nodes (reduce (fn [nodes alias]
+                         (let [keys (filter #(#{"intellij" "plugin" "marketplace-plugin"} (namespace %))
+                                            (keys (get-in edn [:aliases alias :extra-deps])))]
+                           (reduce (fn [nodes key]
+                                     (let [target [:aliases alias :extra-deps key :local/root]]
+                                       (cond
+                                         (.endsWith (name key) "$sources")
+                                         (rewrite/assoc-in nodes target
+                                                           (.getAbsolutePath (io/file (sdks-dir) (str "ideaIC-" version "-sources.jar"))))
+                                         (= "intellij" (namespace key))
+                                         (rewrite/assoc-in nodes target
+                                                           (.getAbsolutePath (io/file (sdks-dir) version)))
+                                         (= "plugin" (namespace key))
+                                         (let [previous (get-in edn target)
+                                               file (io/file previous)
+                                               name (.getName file)]
+                                           (rewrite/assoc-in nodes target
+                                                             (.getAbsolutePath (io/file (sdks-dir) version "plugins" name))))
+                                         (= "marketplace-plugin" (namespace key))
+                                         (let [plugin-id (name key)
+                                               plugin-version (get plugin-map plugin-id)]
+                                           (if plugin-version
+                                             (rewrite/assoc-in nodes target
+                                                               (.getAbsolutePath (plugin-dir plugin-id plugin-version)))
+                                             nodes))
+                                         :else nodes)))
+                                   nodes
+                                   keys)))
+                       nodes
+                       [:sdk :ide])]
+     (spit file-name (str nodes)))))
 
 (comment
   (update-deps-edn "/Users/colin/dev/scribe/integrations/cursive/deps.edn" "253.20558.43-EAP-SNAPSHOT"))

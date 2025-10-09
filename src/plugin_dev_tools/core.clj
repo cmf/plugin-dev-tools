@@ -27,15 +27,26 @@
           resolved-version (if (re-matches #"^\d{4}\.\d+(-eap)?$" marketing-version)
                              (ensure/resolve-idea-version marketing-version)
                              marketing-version)  ; Already a full version
-          sdk (io/file (ensure/sdks-dir) resolved-version)]
+          sdk (io/file (ensure/sdks-dir) resolved-version)
+          plugins (or (:plugins config) [])]
 
       ; Download SDK if not present (this also processes and generates deps.edn files)
       (when-not (fs/exists? sdk)
         (ensure/download-sdk marketing-version))
 
-      ; Now update deps.edn file with resolved version
-      (doseq [module (:modules config)]
-        (ensure/update-deps-edn module resolved-version)))
+      ; Download plugins if specified
+      (let [downloaded-plugins (doall
+                                (for [plugin-spec plugins]
+                                  (let [plugin-id (:id plugin-spec)
+                                        plugin-version (:version plugin-spec)
+                                        plugin-path (ensure/plugin-dir plugin-id plugin-version)]
+                                    (when-not (fs/exists? plugin-path)
+                                      (ensure/download-plugin plugin-spec))
+                                    plugin-spec)))]
+
+        ; Now update deps.edn files with resolved version and plugin info
+        (doseq [module (:modules config)]
+          (ensure/update-deps-edn module resolved-version downloaded-plugins))))
     (catch Exception e
       (println (str "Error: "
                     (.getMessage e)

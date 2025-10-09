@@ -226,3 +226,64 @@
     (let [versions ["252-EAP-SNAPSHOT" "251-EAP-SNAPSHOT"]
           result (ensure/resolve-eap-version "2025.3" versions)]
       (is (= "253-EAP-SNAPSHOT" result)))))
+
+;; Plugin-related tests
+
+(deftest test-plugin-maven-url
+  (testing "constructs correct URL without channel"
+    (let [expected "https://plugins.jetbrains.com/maven/com/jetbrains/plugins/org.intellij.plugins.markdown/1.0.0/org.intellij.plugins.markdown-1.0.0.zip"
+          actual (ensure/plugin-maven-url "org.intellij.plugins.markdown" "1.0.0" nil)]
+      (is (= expected actual))))
+
+  (testing "constructs correct URL with channel"
+    (let [expected "https://plugins.jetbrains.com/maven/eap/com/jetbrains/plugins/kotlin/1.9.0/kotlin-1.9.0.zip"
+          actual (ensure/plugin-maven-url "kotlin" "1.9.0" "eap")]
+      (is (= expected actual)))))
+
+(deftest test-plugin-dir
+  (testing "returns correct plugin directory path"
+    (let [expected (io/file (ensure/sdks-dir) "plugins" "kotlin" "1.9.0")
+          actual (ensure/plugin-dir "kotlin" "1.9.0")]
+      (is (= expected actual)))))
+
+(deftest test-plugin-zipfile
+  (testing "returns correct plugin zipfile path"
+    (let [expected (io/file (ensure/sdks-dir) "plugins" "kotlin" "1.9.0" "kotlin-1.9.0.zip")
+          actual (ensure/plugin-zipfile "kotlin" "1.9.0")]
+      (is (= expected actual)))))
+
+(deftest test-update-deps-edn-with-marketplace-plugins
+  (testing "updates marketplace-plugin dependency paths"
+    (let [version "2023.1.1"
+          plugins [{:id "kotlin" :version "1.9.0"}]
+          input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
+          _ (spit "/tmp/test-marketplace-plugin-deps.edn" input)
+          _ (ensure/update-deps-edn "/tmp/test-marketplace-plugin-deps.edn" version plugins)
+          result (slurp "/tmp/test-marketplace-plugin-deps.edn")
+          parsed (edn/read-string result)
+          expected-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))]
+      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
+
+  (testing "leaves marketplace-plugin unchanged if plugin not in list"
+    (let [version "2023.1.1"
+          plugins []
+          input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
+          _ (spit "/tmp/test-marketplace-plugin-missing.edn" input)
+          _ (ensure/update-deps-edn "/tmp/test-marketplace-plugin-missing.edn" version plugins)
+          result (slurp "/tmp/test-marketplace-plugin-missing.edn")
+          parsed (edn/read-string result)]
+      (is (= "/old/path/kotlin" (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
+
+  (testing "updates both intellij and marketplace-plugin dependencies"
+    (let [version "2023.1.1"
+          plugins [{:id "kotlin" :version "1.9.0"}]
+          input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/sdk\"}
+                                                marketplace-plugin/kotlin {:local/root \"/old/kotlin\"}}}}}"
+          _ (spit "/tmp/test-mixed-deps.edn" input)
+          _ (ensure/update-deps-edn "/tmp/test-mixed-deps.edn" version plugins)
+          result (slurp "/tmp/test-mixed-deps.edn")
+          parsed (edn/read-string result)
+          expected-sdk-path (.getAbsolutePath (io/file (ensure/sdks-dir) version))
+          expected-plugin-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))]
+      (is (= expected-sdk-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
+      (is (= expected-plugin-path (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root]))))))
