@@ -1,5 +1,5 @@
 # Make a 0.0.3 release with recent changes
-**Status:** InProgress
+**Status:** Done
 **Agent PID:** 49833
 
 ## Original Todo
@@ -16,10 +16,18 @@ Changes since 0.0.2:
 *Read [analysis.md](./analysis.md) in full for detailed codebase research and context*
 
 ## Implementation Plan
-- [ ] Verify working directory is clean and all changes are committed
-- [ ] Create annotated git tag 0.0.3 with release notes
-- [ ] Push tag to origin
-- [ ] Verify tag appears on GitHub/remote repository
+- [x] Verify working directory is clean and all changes are committed
+- [x] Create annotated git tag 0.0.3 with release notes
+- [x] Push tag to origin
+- [x] Verify tag appears on GitHub/remote repository
 
 ## Notes
-[Implementation notes]
+**Credential Issue Resolved:**
+The initial push failed because Git Credential Manager Core had cached credentials for the "cursive-ghost" user. Cleared cached credentials using:
+```bash
+git credential-manager-core erase <<EOF
+protocol=https
+host=github.com
+EOF
+```
+This allowed git to authenticate correctly as the "cmf" user.
