@@ -75,3 +75,8 @@ The `:tools/usage {:ns-default plugin-dev-tools.core}` in deps.edn allows invoki
 - `babashka/fs`: File system operations
 - `babashka/curl`: HTTP downloads
 - `borkdude/rewrite-edn`: Structure-preserving EDN rewriting
+
+## Releases
+
+This project is usually consumed using deps.edn git deps, so releases need a
+tag to be pushed to origin.
