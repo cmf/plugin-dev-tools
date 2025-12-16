@@ -16,6 +16,8 @@
            (java.util.zip ZipOutputStream)
            (javax.tools DiagnosticListener ToolProvider)))
 
+(declare build-module)
+
 (def jvm-target "21")
 
 (def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
