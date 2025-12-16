@@ -20,7 +20,7 @@
 
 (def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
 
-(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all"  "-language-version" "2.2"])
+(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all" "-language-version" "2.2"])
 
 
 ;; Config functions
@@ -104,9 +104,9 @@
                                                         (if-let [index (str/last-index-of module-path "/")]
                                                           (subs module-path (inc index))
                                                           module-path))]
-                                        [module-id {:module-path module-path
-                                                    :description module-id
-                                                    :depends []
+                                        [module-id {:module-path  module-path
+                                                    :description  module-id
+                                                    :depends      []
                                                     :main-plugin? (= module-path ".")}]))
                                     modules-config)))
         modules (reduce-kv (fn [ret id details]
@@ -122,22 +122,30 @@
                                    jar-file (if (= module-path ".")
                                               (str "build/distributions/" module ".jar")
                                               (str module-path "/build/distributions/" module ".jar"))
-                                   plugin-directory (or (:plugin-directory details) module)]
+                                   plugin-directory (or (:plugin-directory details) module)
+                                   include-in-sandbox? (if (contains? details :include-in-sandbox?)
+                                                         (:include-in-sandbox? details)
+                                                         true)]
                                (assoc ret module (assoc details :module module
                                                                 :module-path module-path
                                                                 :deps-file deps-file
                                                                 :jar-file jar-file
-                                                                :plugin-directory plugin-directory))))
+                                                                :plugin-directory plugin-directory
+                                                                :include-in-sandbox? include-in-sandbox?))))
                            (sorted-map)
                            (:modules config))
-        deps-map (reduce (fn [ret {:keys [module depends]}]
-                           (assoc ret module (set depends)))
+        deps-map (reduce (fn [ret {:keys [module depends ksp ksp-test]}]
+                           (let [processor-deps (keep :processor-module [ksp ksp-test])
+                                 depends (set (concat depends processor-deps))]
+                             (assoc ret module depends)))
                          {}
                          (vals modules))
         order (kahn-sort deps-map)]
     (if (nil? order)
       (throw (ex-info "Dependency cycle" {:deps deps-map}))
-      (let [ret (mapv modules (reverse order))]
+      (let [modules-with-deps (into {} (map (fn [[k v]] [k (assoc v :depends (get deps-map k))]) modules))
+            ret (mapv #(assoc % :all-modules modules-with-deps)
+                      (mapv modules (reverse order)))]
         (if-let [build-ns (find-ns 'build)]
           (if-let [customise (ns-resolve build-ns 'customise-modules)]
             (customise ret args)
@@ -385,6 +393,55 @@
                                     processor-jar]))]
       (process/process {:command-args cmdline}))))
 
+(defn- module-ksp-options
+  "Build ksp-run options for a module config (or test variant).
+  Returns nil when no KSP config."
+  [{:keys [module module-path all-modules] :as module-config} test?]
+  (let [ksp (get module-config (if test? :ksp-test :ksp))]
+    (when ksp
+      (let [processor-module (:processor-module ksp)
+            proc-info (get all-modules processor-module)]
+        (when-not proc-info
+          (throw (ex-info "Processor module not found" {:processor-module processor-module
+                                                       :available (keys all-modules)})))
+        (let [processor-jar (:jar-file proc-info)
+              cache-dir (str (:module-path proc-info) "/build/caches")
+              output-dir (str (when (not= module-path ".") (str module-path "/"))
+                              (if test? "test/generated" "src/generated"))]
+          (merge {:project-root         module-path
+                  :output-dir           output-dir
+                  :cache-dir            cache-dir
+                  :processor-jar        processor-jar
+                  :target-packages      (:target-packages ksp)
+                  :target-packages-prop (:target-packages-prop ksp)
+                  :aliases              (:aliases ksp)
+                  :ksp-aliases          (:ksp-aliases ksp)
+                  :sdk-aliases          (:sdk-aliases ksp)
+                  :allow-unsafe?        (:allow-unsafe? ksp)
+                  :extra-jvm-opts       (:extra-jvm-opts ksp)
+                  :module-name          (or (:module-name ksp) module)}
+                 (select-keys ksp [:jvm-target :language-version :api-version])))))))
+
+(defn- ensure-processor-jar
+  "Ensure the processor jar exists by building the processor module if needed."
+  [processor-module all-modules]
+  (let [{:keys [jar-file] :as proc-info} (get all-modules processor-module)]
+    (when-not proc-info
+      (throw (ex-info "Processor module not found" {:processor-module processor-module
+                                                   :available (keys all-modules)})))
+    (when-not (fs/exists? jar-file)
+      (build-module proc-info))
+    jar-file))
+
+(defn run-module-ksp
+  "Invoke KSP for a module if configured. Returns nil when no KSP config."
+  [module-config test?]
+  (when-let [{:keys [processor-jar] :as opts} (module-ksp-options module-config test?)]
+    (ensure-processor-jar (:processor-module (get module-config (if test? :ksp-test :ksp)))
+                          (:all-modules module-config))
+    (println "Running KSP for" (:description module-config) (if test? "(test)" ""))
+    (ksp-run opts)))
+
 (defn compile-module
   ([module-config]
    (compile-module module-config false))
@@ -403,9 +460,9 @@
                                  (comp
                                    (filter #(.isDirectory (io/file %)))
                                    (filter #(str/index-of % "out/production"))
-                                   (map #(if (.isAbsolute (io/file %))
-                                           %
-                                           (.getAbsolutePath (io/file %)))))
+                                  (map #(if (.isAbsolute (io/file %))
+                                          %
+                                          (.getAbsolutePath (io/file %)))))
                                  (:classpath-roots basis)))
          javac-opts (or javac-opts plugin-dev-tools.build/javac-opts)
          kotlinc-opts (let [opts (conj (vec (or kotlinc-opts plugin-dev-tools.build/kotlinc-opts)) "-module-name" module)
@@ -440,6 +497,8 @@
                                   (:java-test-paths module-config)
                                   (:java-src-paths module-config)))
          clojure-paths (when-not test? (find-paths (:clojure-src-paths module-config)))]
+     (run-module-ksp module-config false)
+     (when test? (run-module-ksp module-config true))
      (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
        (println "Compiling" description (if test? "tests" ""))
        (when-not (empty? kotlin-paths)
@@ -482,7 +541,7 @@
                           (comp
                             (filter (fn [path]
                                       (some #(str/index-of path %) resource-paths)))
-                           (map #(path-to module-config %)))
+                            (map #(path-to module-config %)))
                           paths)]
       (when-not (empty? resources)
         (api/copy-dir {:src-dirs   (-> resources
@@ -508,9 +567,10 @@
     :sandbox-dir   Base sandbox directory (default \"sandbox\")"
   [{:keys [sandbox-dir] :or {sandbox-dir "sandbox"} :as args}]
   (let [basis (api/create-basis {:aliases (into [:no-clojure] (:extra-aliases args))})
-        modules (module-info args)]
+        modules (module-info args)
+        sandbox-modules (filter #(get % :include-in-sandbox? true) modules)]
     (run! build-module modules)
-    (let [plugin-jars (mapv :jar-file modules)
+    (let [plugin-jars (mapv :jar-file sandbox-modules)
           dir (plugin-directory modules)
           disabled-file "disabled_plugins.txt"
           sandbox-lib (str sandbox-dir "/plugins/" dir "/lib")]
