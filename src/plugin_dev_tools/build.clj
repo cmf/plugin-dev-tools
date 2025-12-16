@@ -127,13 +127,17 @@
                                    plugin-directory (or (:plugin-directory details) module)
                                    include-in-sandbox? (if (contains? details :include-in-sandbox?)
                                                          (:include-in-sandbox? details)
-                                                         true)]
+                                                         true)
+                                   merge-into-main? (if (contains? details :merge-into-main?)
+                                                      (:merge-into-main? details)
+                                                      false)]
                                (assoc ret module (assoc details :module module
                                                                 :module-path module-path
                                                                 :deps-file deps-file
                                                                 :jar-file jar-file
                                                                 :plugin-directory plugin-directory
-                                                                :include-in-sandbox? include-in-sandbox?))))
+                                                                :include-in-sandbox? include-in-sandbox?
+                                                                :merge-into-main? merge-into-main?))))
                            (sorted-map)
                            (:modules config))
         deps-map (reduce (fn [ret {:keys [module depends ksp ksp-test]}]
@@ -556,13 +560,23 @@
                           (comp
                             (filter (fn [path]
                                       (some #(str/index-of path %) resource-paths)))
-                            (map #(path-to module-config %)))
-                          paths)]
+                           (map #(path-to module-config %)))
+                         paths)]
       (when-not (empty? resources)
         (api/copy-dir {:src-dirs   (-> resources
                                        (into (map #(path-to module-config %)) resource-paths)
                                        distinct)
                        :target-dir target})))
+    (when main-plugin?
+      (let [all-modules (vals (:all-modules module-config))
+            mergees (filter #(and (not= (:module %) module)
+                                  (:merge-into-main? %))
+                            all-modules)]
+        (doseq [{:keys [module]} mergees
+                :let [src (str "out/production/" module)]]
+          (when (fs/exists? src)
+            (api/copy-dir {:src-dirs   [src]
+                           :target-dir target})))))
     (when main-plugin?
       (let [config (edn/read-string (slurp "plugin.edn"))]
         (update-plugin-xml {:target           target
