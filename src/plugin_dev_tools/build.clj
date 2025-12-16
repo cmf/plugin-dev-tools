@@ -493,7 +493,9 @@
         (update-plugin-xml {:target           target
                             :plugin-version   (plugin-version config)
                             :base-dir         "."
-                            :description-path "description.html"})))
+                            :description-path "description.html"
+                            :copy-resources?  true
+                            :resource-dirs    resource-paths})))
     (api/jar {:class-dir target
               :jar-file  jar-file})))
 
