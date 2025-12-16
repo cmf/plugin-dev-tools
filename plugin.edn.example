@@ -1,6 +1,18 @@
 {:idea-version "2025.2-eap"
- :kotlin-version "2.1.0"
- :serialization-version "1.7.3"
- :coroutines-version "1.9.0"
- :ksp-version "2.1.0-1.0.29"
- :modules ["deps.edn"]}
+:kotlin-version "2.1.0"
+:serialization-version "1.7.3"
+:coroutines-version "1.9.0"
+:ksp-version "2.1.0-1.0.29"
+:modules {"my-plugin" {:module-path "."
+                       :description "Main plugin"
+                       :main-plugin? true
+                       :serialization? true
+                       :plugin-directory "my-plugin-id"
+                       :kotlin-src-paths ["src/kotlin"]
+                       :java-src-paths ["src/java"]
+                       :resource-paths ["resources"]
+                       :depends ["shared"]}
+          "shared"    {:module-path "shared"
+                       :description "Shared code"
+                       :java-src-paths ["src/java"]
+                       :resource-paths ["resources"]}}}

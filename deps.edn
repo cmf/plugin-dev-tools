@@ -1,12 +1,14 @@
-{:deps       {babashka/fs          {:mvn/version "0.5.26"}
-              babashka/curl        {:git/url "https://github.com/babashka/babashka.curl"
-                                    :git/sha "2187f908c033da45978512979c53bb53321120ce"}
-              borkdude/rewrite-edn {:git/url "https://github.com/borkdude/rewrite-edn"
-                                    :git/sha "97b6493a7977c7130c3d66cd14fe6371f0537e6c"}}
- :aliases    {:test {:extra-paths ["test"]
-                     :extra-deps  {org.clojure/test.check {:mvn/version "1.1.1"}
-                                   io.github.cognitect-labs/test-runner {:git/tag "v0.5.1"
-                                                                         :git/sha "dfb30dd"}}
-                     :main-opts   ["-m" "cognitect.test-runner"]
-                     :exec-fn     cognitect.test-runner.api/test}}
+{:deps        {babashka/fs                   {:mvn/version "0.5.26"}
+               babashka/curl                 {:git/url "https://github.com/babashka/babashka.curl"
+                                              :git/sha "2187f908c033da45978512979c53bb53321120ce"}
+               borkdude/rewrite-edn          {:git/url "https://github.com/borkdude/rewrite-edn"
+                                              :git/sha "97b6493a7977c7130c3d66cd14fe6371f0537e6c"}
+               io.github.clojure/tools.build {:git/tag "v0.10.4"
+                                              :git/sha "4f6f847c24c249f5760b84c08863622b003feecf"}}
+ :aliases     {:test {:extra-paths ["test"]
+                      :extra-deps  {org.clojure/test.check               {:mvn/version "1.1.1"}
+                                    io.github.cognitect-labs/test-runner {:git/tag "v0.5.1"
+                                                                          :git/sha "dfb30dd"}}
+                      :main-opts   ["-m" "cognitect.test-runner"]
+                      :exec-fn     cognitect.test-runner.api/test}}
  :tools/usage {:ns-default plugin-dev-tools.core}}
