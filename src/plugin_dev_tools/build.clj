@@ -357,9 +357,12 @@
                                (.getParentFile (io/file java-home))
                                (io/file java-home))]
                      (.getAbsolutePath jdk))
+          system-props (when (and target-packages-prop (seq target-packages))
+                         [(str "-D" target-packages-prop "=" (str/join "," target-packages))])
           cmdline (filterv some?
                            (concat ["java"]
                                    extra-jvm-opts
+                                   system-props
                                    (when allow-unsafe? ["--sun-misc-unsafe-memory-access=allow"])
                                    ["-Xmx2048m" "-cp" cp
                                     ksp-main
@@ -379,9 +382,7 @@
                                     "-api-version" api-version
                                     "-incremental=false"
                                     "-incremental-log=false"
-                                    processor-jar]
-                                   (when (and target-packages-prop (seq target-packages))
-                                     [(str "-D" target-packages-prop "=" (str/join "," target-packages))])))]
+                                    processor-jar]))]
       (process/process {:command-args cmdline}))))
 
 (defn compile-module
