@@ -20,7 +20,7 @@
 
 (def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
 
-(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all"])
+(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all"  "-language-version" "2.2"])
 
 
 ;; Config functions
@@ -481,10 +481,12 @@
                           (comp
                             (filter (fn [path]
                                       (some #(str/index-of path %) resource-paths)))
-                            (map #(path-to module-config %)))
+                           (map #(path-to module-config %)))
                           paths)]
       (when-not (empty? resources)
-        (api/copy-dir {:src-dirs   resources
+        (api/copy-dir {:src-dirs   (-> resources
+                                       (into (map #(path-to module-config %)) resource-paths)
+                                       distinct)
                        :target-dir target})))
     (when main-plugin?
       (let [config (edn/read-string (slurp "plugin.edn"))]
