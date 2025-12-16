@@ -138,8 +138,10 @@
     (if (nil? order)
       (throw (ex-info "Dependency cycle" {:deps deps-map}))
       (let [ret (mapv modules (reverse order))]
-        (if-let [customise (ns-resolve (find-ns 'build) 'customise-modules)]
-          (customise ret args)
+        (if-let [build-ns (find-ns 'build)]
+          (if-let [customise (ns-resolve build-ns 'customise-modules)]
+            (customise ret args)
+            ret)
           ret)))))
 
 
