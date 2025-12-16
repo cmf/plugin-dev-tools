@@ -510,16 +510,19 @@
                           test? (into [:test :test-exec]))
          basis (binding [api/*project-root* module-path]
                  (api/create-basis {:aliases module-aliases}))
-         dependency-dirs (into [] (map #(str "out/production/" %)) depends)
-         production-dirs (when test?
-                           (into []
-                                 (comp
-                                   (filter #(.isDirectory (io/file %)))
-                                   (filter #(str/index-of % "out/production"))
-                                   (map #(if (.isAbsolute (io/file %))
-                                           %
-                                           (.getAbsolutePath (io/file %)))))
-                                 (:classpath-roots basis)))
+         dep-prod-dirs (into [] (map #(str "out/production/" %)) depends)
+         self-prod (str "out/production/" module)
+         prod-dirs (when test?
+                     (into []
+                           (keep (fn [m]
+                                   (let [p (str "out/production/" m)]
+                                     (when (fs/directory? p)
+                                       (.getAbsolutePath (io/file p))))))
+                           (cons module depends)))
+         dependency-dirs (if test?
+                           (into [self-prod] dep-prod-dirs)
+                           dep-prod-dirs)
+         production-dirs prod-dirs
          javac-opts (or javac-opts plugin-dev-tools.build/javac-opts)
          kotlinc-opts (let [opts (conj (vec (or kotlinc-opts plugin-dev-tools.build/kotlinc-opts)) "-module-name" module)
                             opts (if serialization?
