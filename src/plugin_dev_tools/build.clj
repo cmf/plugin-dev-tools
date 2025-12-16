@@ -388,14 +388,14 @@
   ([module-config]
    (compile-module module-config false))
   ([{:keys [module module-path description
-            javac-opts kotlinc-opts serialization?]
+            javac-opts kotlinc-opts serialization? extra-aliases]
      :as   module-config}
     test?]
    (let [target (str "out/" (if test? "test" "production") "/" module)
+         module-aliases (cond-> (into [:no-clojure :sdk] extra-aliases)
+                          test? (into [:test :test-exec]))
          basis (binding [api/*project-root* module-path]
-                 (api/create-basis {:aliases (into [:no-clojure :sdk]
-                                                   (when test?
-                                                     [:test :test-exec]))}))
+                 (api/create-basis {:aliases module-aliases}))
          production-dirs (when test?
                            (into []
                                  (comp
