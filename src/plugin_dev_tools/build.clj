@@ -240,6 +240,39 @@
 
 ;; Metadata helpers
 
+(defn- newest-file-time
+  "Return the newest modification time (millis) across files/dirs, or nil when none exist."
+  [paths]
+  (let [update-max (fn update-max [acc path]
+                     (let [f (fs/file path)]
+                       (cond
+                         (fs/regular-file? f)
+                         (let [t (-> f fs/last-modified-time fs/file-time->millis)]
+                           (if acc (max acc t) t))
+
+                         (fs/directory? f)
+                         (let [latest (reduce update-max nil (filter fs/regular-file? (fs/walk f)))]
+                           (if latest (if acc (max acc latest) latest) acc))
+
+                         :else acc)))]
+    (reduce update-max nil paths)))
+
+(defn needs-build?
+  "Returns true when outputs are missing/empty or any input is newer than outputs."
+  [outputs inputs]
+  (let [inputs (remove nil? inputs)
+        outputs (remove nil? outputs)
+        missing-output? (some #(not (fs/exists? %)) outputs)
+        newest-input (newest-file-time inputs)
+        newest-output (newest-file-time outputs)]
+    (cond
+      (empty? outputs) true
+      missing-output? true
+      (nil? newest-output) true
+      (nil? newest-input) false
+      (> newest-input newest-output) true
+      :else false)))
+
 (defn git-revision
   "Return git describe output for HEAD in dir (default \".\")."
   ([] (git-revision "."))
@@ -426,7 +459,7 @@
             proc-info (get all-modules processor-module)]
         (when-not proc-info
           (throw (ex-info "Processor module not found" {:processor-module processor-module
-                                                       :available (keys all-modules)})))
+                                                        :available        (keys all-modules)})))
         (let [processor-jar (:jar-file proc-info)
               cache-dir (str (:module-path proc-info) "/build/caches")
               output-dir (str (when (not= module-path ".") (str module-path "/"))
@@ -451,7 +484,7 @@
   (let [{:keys [jar-file] :as proc-info} (get all-modules processor-module)]
     (when-not proc-info
       (throw (ex-info "Processor module not found" {:processor-module processor-module
-                                                   :available (keys all-modules)})))
+                                                    :available        (keys all-modules)})))
     (when-not (fs/exists? jar-file)
       (build-module proc-info))
     jar-file))
@@ -483,9 +516,9 @@
                                  (comp
                                    (filter #(.isDirectory (io/file %)))
                                    (filter #(str/index-of % "out/production"))
-                                  (map #(if (.isAbsolute (io/file %))
-                                          %
-                                          (.getAbsolutePath (io/file %)))))
+                                   (map #(if (.isAbsolute (io/file %))
+                                           %
+                                           (.getAbsolutePath (io/file %)))))
                                  (:classpath-roots basis)))
          javac-opts (or javac-opts plugin-dev-tools.build/javac-opts)
          kotlinc-opts (let [opts (conj (vec (or kotlinc-opts plugin-dev-tools.build/kotlinc-opts)) "-module-name" module)
@@ -519,33 +552,58 @@
          java-paths (find-paths (if test?
                                   (:java-test-paths module-config)
                                   (:java-src-paths module-config)))
-         clojure-paths (when-not test? (find-paths (:clojure-src-paths module-config)))]
-     (run-module-ksp module-config false)
-     (when test? (run-module-ksp module-config true))
-     (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
-       (println "Compiling" description (if test? "tests" ""))
-       (when-not (empty? kotlin-paths)
-         (println " - compiling Kotlin")
-         (kotlinc (cond-> {:src-dirs     kotlin-paths
-                           :class-dir    target
-                           :basis        basis
-                           :kotlinc-opts kotlinc-opts
-                           :extra-paths  dependency-dirs}
-                    test? (update :extra-paths into production-dirs))))
-       (when-not (empty? java-paths)
-         (println " - compiling Java")
-         (javac (cond-> {:src-dirs   java-paths
-                         :class-dir  target
-                         :basis      basis
-                         :javac-opts javac-opts
-                         :extra-dirs dependency-dirs}
-                  test? (update :extra-dirs into production-dirs))))
-       (when-not (empty? clojure-paths)
-         (println " - compiling Clojure")
-         (api/compile-clj {:src-dirs  clojure-paths
-                           :class-dir target
-                           :basis     (update basis :classpath
-                                              assoc target {:path-key :paths})}))))))
+         clojure-paths (when-not test? (find-paths (:clojure-src-paths module-config)))
+         resource-paths (map #(path-to module-config %) (:resource-paths module-config))
+         ksp-opts (module-ksp-options module-config false)
+         ksp-test-opts (when test? (module-ksp-options module-config true))
+         generated-dirs (into [] (keep :output-dir) [ksp-opts ksp-test-opts])
+         inputs (into []
+                      (comp
+                        cat
+                        (remove nil?))
+                      [kotlin-paths
+                       java-paths
+                       clojure-paths
+                       resource-paths
+                       generated-dirs
+                       [(:deps-file module-config)
+                        "plugin.edn"]])
+         outputs (into [target] generated-dirs)]
+    (if (or (empty? inputs)
+            (needs-build? outputs inputs))
+      (do
+        (doseq [dir (cons target generated-dirs)]
+          (when (fs/exists? dir)
+            (fs/delete-tree dir)))
+        (when (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
+          (println "Compiling" description (if test? "tests" "") "(no sources found, only KSP/resources may run)"))
+        (run-module-ksp module-config false)
+        (when test? (run-module-ksp module-config true))
+        (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
+           (println "Compiling" description (if test? "tests" ""))
+           (when-not (empty? kotlin-paths)
+             (println " - compiling Kotlin")
+             (kotlinc (cond-> {:src-dirs     kotlin-paths
+                               :class-dir    target
+                               :basis        basis
+                               :kotlinc-opts kotlinc-opts
+                               :extra-paths  dependency-dirs}
+                        test? (update :extra-paths into production-dirs))))
+           (when-not (empty? java-paths)
+             (println " - compiling Java")
+             (javac (cond-> {:src-dirs   java-paths
+                             :class-dir  target
+                             :basis      basis
+                             :javac-opts javac-opts
+                             :extra-dirs dependency-dirs}
+                      test? (update :extra-dirs into production-dirs))))
+           (when-not (empty? clojure-paths)
+             (println " - compiling Clojure")
+             (api/compile-clj {:src-dirs  clojure-paths
+                               :class-dir target
+                               :basis     (update basis :classpath
+                                                  assoc target {:path-key :paths})}))))
+       (println "Skipping" description (if test? "tests" "") "- up to date")))))
 
 
 (defn build-module [{:keys [module module-path description resource-paths main-plugin? jar-file]
@@ -564,8 +622,8 @@
                           (comp
                             (filter (fn [path]
                                       (some #(str/index-of path %) resource-paths)))
-                           (map #(path-to module-config %)))
-                         paths)]
+                            (map #(path-to module-config %)))
+                          paths)]
       (when-not (empty? resources)
         (api/copy-dir {:src-dirs   (-> resources
                                        (into (map #(path-to module-config %)) resource-paths)
@@ -689,7 +747,6 @@
 ;; Top level commands
 
 (defn compile [args]
-  (clean args)
   (run! compile-module (module-info args))
   (sync-kotlinc-plugin))
 
