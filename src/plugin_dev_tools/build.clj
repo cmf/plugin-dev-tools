@@ -387,7 +387,7 @@
 (defn compile-module
   ([module-config]
    (compile-module module-config false))
-  ([{:keys [module module-path description
+  ([{:keys [module module-path description depends
             javac-opts kotlinc-opts serialization? extra-aliases]
      :as   module-config}
     test?]
@@ -396,6 +396,7 @@
                           test? (into [:test :test-exec]))
          basis (binding [api/*project-root* module-path]
                  (api/create-basis {:aliases module-aliases}))
+         dependency-dirs (into [] (map #(str "out/production/" %)) depends)
          production-dirs (when test?
                            (into []
                                  (comp
@@ -445,15 +446,17 @@
          (kotlinc (cond-> {:src-dirs     kotlin-paths
                            :class-dir    target
                            :basis        basis
-                           :kotlinc-opts kotlinc-opts}
-                    test? (assoc :extra-paths production-dirs))))
+                           :kotlinc-opts kotlinc-opts
+                           :extra-paths  dependency-dirs}
+                    test? (update :extra-paths into production-dirs))))
        (when-not (empty? java-paths)
          (println " - compiling Java")
          (javac (cond-> {:src-dirs   java-paths
                          :class-dir  target
                          :basis      basis
-                         :javac-opts javac-opts}
-                  test? (assoc :extra-dirs production-dirs))))
+                         :javac-opts javac-opts
+                         :extra-dirs dependency-dirs}
+                  test? (update :extra-dirs into production-dirs))))
        (when-not (empty? clojure-paths)
          (println " - compiling Clojure")
          (api/compile-clj {:src-dirs  clojure-paths
