@@ -572,11 +572,16 @@
             mergees (filter #(and (not= (:module %) module)
                                   (:merge-into-main? %))
                             all-modules)]
-        (doseq [{:keys [module]} mergees
+        (doseq [{:keys [module module-path resource-paths]} mergees
                 :let [src (str "out/production/" module)]]
           (when (fs/exists? src)
             (api/copy-dir {:src-dirs   [src]
-                           :target-dir target})))))
+                           :target-dir target}))
+          (doseq [res resource-paths]
+            (let [res-path (path-to {:module-path module-path} res)]
+              (when (fs/exists? res-path)
+                (api/copy-dir {:src-dirs   [res-path]
+                               :target-dir target})))))))
     (when main-plugin?
       (let [config (edn/read-string (slurp "plugin.edn"))]
         (update-plugin-xml {:target           target
