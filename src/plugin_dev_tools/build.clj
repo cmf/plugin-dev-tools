@@ -251,7 +251,7 @@
                            (if acc (max acc t) t))
 
                          (fs/directory? f)
-                         (let [latest (reduce update-max nil (filter fs/regular-file? (fs/walk f)))]
+                         (let [latest (reduce update-max nil (filter fs/regular-file? (fs/file-tree-seq f)))]
                            (if latest (if acc (max acc latest) latest) acc))
 
                          :else acc)))]
