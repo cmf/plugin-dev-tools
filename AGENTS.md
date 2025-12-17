@@ -1,11 +1,8 @@
 # CLAUDE.md
 
-This repo provides Clojure tooling for Kotlin/Java IntelliJ plugins (avoid Gradle). It is used both as a CLI tool and as a build library (Cursive/Scribe).
-
-- **Config:** `plugin.edn` in consuming repos. `:modules` is now usually a map keyed by module id with metadata (`:module-path`, `:description`, `:main-plugin?`, source/resource path vectors, `:depends`, etc.).
-- **CLI (`plugin-dev-tools.core`):**
-  - `clj -Ttools ensure-sdk` – downloads SDK/plugins to `~/.sdks`, rewrites module `deps.edn` `:local/root`s via `plugin-dev-tools.ensure`.
-  - `clj -Ttools ensure-kotlin` – rewrites Kotlin/serialization/coroutines/KSP versions in module `deps.edn` via `plugin-dev-tools.update-kotlin`.
-- **Build library (`plugin-dev-tools.build`):** helpers for module expansion (`module-info`), javac/kotlinc wrappers, KSP runner, plugin.xml updater, sandbox packaging, plugin verifier. Consuming `build.clj` typically wraps these entry points: `compile`, `compile-tests`, `package`.
-- **deps.edn rewriting:** uses `borkdude.rewrite-edn` to preserve formatting/comments.
-- **SDK storage:** `~/.sdks/ideaIU-{version}.zip`, `~/.sdks/{version}/`, `~/.sdks/ideaIC-{version}-sources.jar`, plugins under `~/.sdks/plugins/{id}/{version}/`.
+Concise notes for working here:
+- Purpose: Clojure tooling for Kotlin/Java IntelliJ plugins (CLI + build lib). Avoids Gradle.
+- Config (`plugin.edn`): map under `:modules` keyed by module id; metadata includes `:module-path`, `:description`, `:depends`, path vectors, `:main-plugin?`, `:plugin-directory`, `:include-in-sandbox?` (default true), `:merge-into-main?` (default false), `:serialization?`, optional `:ksp`/`:ksp-test` blocks (`:processor-module`, `:target-packages`, optional `:target-packages-prop`, alias overrides). `module-info` derives deps files and ordering for all commands.
+- CLI (`plugin-dev-tools.core`): `clj -Tplugin ensure-sdk` downloads SDK/plugins to `~/.sdks`, rewrites module `deps.edn` roots; `clj -Tplugin ensure-kotlin` rewrites Kotlin/serialization/coroutines/KSP versions.
+- Build lib (`plugin-dev-tools.build`): main entry points `compile`, `compile-tests`, `package`; KSP runs declaratively from module blocks and will build processor modules as needed; helpers for `ksp-run`, `kotlinc`, `javac`, sandbox prep, plugin.xml update, verifier.
+- `deps.edn` rewrites preserve formatting via `borkdude.rewrite-edn`. Plugins/SDK stored under `~/.sdks/` and `~/.sdks/plugins/{id}/{version}/`.

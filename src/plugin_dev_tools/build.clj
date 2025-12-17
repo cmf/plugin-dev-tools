@@ -144,12 +144,17 @@
 (defn clean [args]
   (let [modules (module-info args)
         dir (plugin-directory modules)
+        ksp-dirs (for [m modules
+                       suffix ["src/generated/ksp" "test/generated/ksp"]
+                       :when (or (:ksp m) (:ksp-test m))]
+                   (path-to m suffix))
         dirs (into ["out/production"
                     "out/test"
                     "out/generated"
                     "build-tools/build"
                     (str "sandbox/plugins/" dir "/lib")]
-                   (map #(path-to % "build") modules))]
+                   (concat (map #(path-to % "build") modules)
+                           ksp-dirs))]
     (doseq [path dirs]
       (api/delete {:path path}))))
 
@@ -376,62 +381,60 @@
   (let [aliases (or aliases [])
         ksp-aliases (or ksp-aliases [:no-clojure :ksp-plugin])
         sdk-aliases (or sdk-aliases [:no-clojure :sdk])
-        extra-jvm-opts (or extra-jvm-opts [])]
-    (binding [api/*project-root* project-root]
-      (let [ksp-basis (api/create-basis {:aliases (into ksp-aliases aliases)})
-            ksp-cp (mapcat :paths (vals (:libs ksp-basis)))
-            libs-basis (api/create-basis {:aliases (into sdk-aliases aliases)})
-            libs (mapcat :paths (vals (:libs libs-basis)))
-            paths (map #(absolutize project-root %)
-                       (or (seq src-dirs) (basis-source-roots libs-basis project-root)))
-            cp (str/join File/pathSeparator ksp-cp)
-            jdk-home (let [java-home (System/getProperty "java.home")
-                           jdk (if (.endsWith java-home "jre")
-                                 (.getParentFile (io/file java-home))
-                                 (io/file java-home))]
-                       (.getAbsolutePath jdk))
-            main-present? (or (not ksp-main)
-                              (not (seq ksp-cp))
-                              (try
-                                (let [urls (into-array URL (map #(-> % io/file .toURI .toURL) ksp-cp))]
-                                  (with-open [loader (URLClassLoader. urls)]
-                                    (.loadClass loader ksp-main)))
-                                true
-                                (catch ClassNotFoundException _
-                                  false)))]
-        (if-not main-present?
-          (do
-            (println "Skipping KSP run: missing main class" ksp-main)
-            nil)
-          (let [system-props (when (and target-packages-prop (seq target-packages))
-                               [(str "-D" target-packages-prop "=" (str/join "," target-packages))])
-                cmdline (filterv some?
-                                 (concat ["java"]
-                                         extra-jvm-opts
-                                         system-props
-                                         (when allow-unsafe? ["--sun-misc-unsafe-memory-access=allow"])
-                                         ["-Xmx2048m" "-cp" cp
-                                          ksp-main
-                                          "-jvm-target" jvm-target
-                                          (str "-module-name=" module-name)
-                                          "-jdk-home" jdk-home
-                                          "-source-roots" (str/join File/pathSeparator (map #(.getPath ^File %) paths))
-                                          "-libraries" (str/join File/pathSeparator libs)
-                                          "-project-base-dir" "."
-                                          "-output-base-dir" output-dir
-                                          "-caches-dir" (or cache-dir output-dir)
-                                          "-class-output-dir" output-dir
-                                          "-kotlin-output-dir" output-dir
-                                          "-java-output-dir" output-dir
-                                          "-resource-output-dir" (str output-dir "/resources")
-                                          "-language-version" language-version
-                                          "-api-version" api-version
-                                          "-incremental=false"
-                                          "-incremental-log=false"
-                                          processor-jar]))]
-            (println (str/join " " cmdline))
-            (process/process {:command-args cmdline})
-            (prn (into [] (map File/.getPath) (file-seq (io/file output-dir))))))))))
+        extra-jvm-opts (or extra-jvm-opts [])
+        ksp-basis (binding [api/*project-root* project-root]
+                    (api/create-basis {:aliases (into ksp-aliases aliases)}))
+        ksp-cp (mapcat :paths (vals (:libs ksp-basis)))
+        libs-basis (api/create-basis {:aliases (into sdk-aliases aliases)})
+        libs (mapcat :paths (vals (:libs libs-basis)))
+        paths (map #(absolutize project-root %)
+                   (or (seq src-dirs) (basis-source-roots libs-basis project-root)))
+        cp (str/join File/pathSeparator ksp-cp)
+        jdk-home (let [java-home (System/getProperty "java.home")
+                       jdk (if (.endsWith java-home "jre")
+                             (.getParentFile (io/file java-home))
+                             (io/file java-home))]
+                   (.getAbsolutePath jdk))
+        main-present? (or (not ksp-main)
+                          (not (seq ksp-cp))
+                          (try
+                            (let [urls (into-array URL (map #(-> % io/file .toURI .toURL) ksp-cp))]
+                              (with-open [loader (URLClassLoader. urls)]
+                                (.loadClass loader ksp-main)))
+                            true
+                            (catch ClassNotFoundException _
+                              false)))]
+    (if-not main-present?
+      (do
+        (println "Skipping KSP run: missing main class" ksp-main)
+        nil)
+      (let [system-props (when (and target-packages-prop (seq target-packages))
+                           [(str "-D" target-packages-prop "=" (str/join "," target-packages))])
+            cmdline (filterv some?
+                             (concat ["java"]
+                                     extra-jvm-opts
+                                     system-props
+                                     (when allow-unsafe? ["--sun-misc-unsafe-memory-access=allow"])
+                                     ["-Xmx2048m" "-cp" cp
+                                      ksp-main
+                                      "-jvm-target" jvm-target
+                                      (str "-module-name=" module-name)
+                                      "-jdk-home" jdk-home
+                                      "-source-roots" (str/join File/pathSeparator (map #(.getPath ^File %) paths))
+                                      "-libraries" (str/join File/pathSeparator libs)
+                                      "-project-base-dir" "."
+                                      "-output-base-dir" output-dir
+                                      "-caches-dir" (or cache-dir output-dir)
+                                      "-class-output-dir" output-dir
+                                      "-kotlin-output-dir" output-dir
+                                      "-java-output-dir" output-dir
+                                      "-resource-output-dir" (str output-dir "/resources")
+                                      "-language-version" language-version
+                                      "-api-version" api-version
+                                      "-incremental=false"
+                                      "-incremental-log=false"
+                                      processor-jar]))]
+        (process/process {:command-args cmdline})))))
 
 (defn- module-ksp-options
   "Build ksp-run options for a module config (or test variant).
@@ -449,8 +452,8 @@
                                (str (:module-path proc-info) "/"))
                              "build/caches")
               output-dir (str (when (not= module-path ".") (str module-path "/"))
-                              (if test? "test/generated" "src/generated"))]
-          (merge {:project-root         "."
+                              (if test? "test/generated/ksp" "src/generated/ksp"))]
+          (merge {:project-root         module-path
                   :output-dir           output-dir
                   :cache-dir            cache-dir
                   :processor-jar        processor-jar
@@ -543,9 +546,20 @@
                                   (:java-src-paths module-config)))
          clojure-paths (when-not test? (find-paths (:clojure-src-paths module-config)))
          resource-paths (map #(path-to module-config %) (:resource-paths module-config))
-         ksp-opts (module-ksp-options module-config false)
+         ksp-opts (when-not test? (module-ksp-options module-config false))
          ksp-test-opts (when test? (module-ksp-options module-config true))
          generated-dirs (into [] (keep :output-dir) [ksp-opts ksp-test-opts])
+         kotlin-paths (let [paths (vec kotlin-paths)
+                            prefixes (map fs/absolutize paths)
+                            extras (if (seq paths)
+                                     (remove (fn [p]
+                                               (let [p* (fs/absolutize p)]
+                                                 (some #(fs/starts-with? p* %) prefixes)))
+                                             generated-dirs)
+                                     generated-dirs)]
+                        (vec (distinct (into paths extras))))
+         resource-paths (let [generated-resources (map #(str % "/resources") generated-dirs)]
+                          (vec (distinct (into resource-paths generated-resources))))
          inputs (into []
                       (comp
                         cat
@@ -567,8 +581,7 @@
            (fs/create-dirs dir))
          (when (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
            (println "Compiling" description (if test? "tests" "") "(no sources found, only KSP/resources may run)"))
-         (run-module-ksp module-config false)
-         (when test? (run-module-ksp module-config true))
+         (run-module-ksp module-config (boolean test?))
          (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
            (println "Compiling" description (if test? "tests" ""))
            (when-not (empty? kotlin-paths)
@@ -592,8 +605,8 @@
              (api/compile-clj {:src-dirs  clojure-paths
                                :class-dir target
                                :basis     (update basis :classpath
-                                                  assoc target {:path-key :paths})})))
-         (println "Skipping" description (if test? "tests" "") "- up to date"))))))
+                                                  assoc target {:path-key :paths})}))))
+       (println "Skipping" description (if test? "tests" "") "- up to date")))))
 
 (defn build-module [{:keys [module module-path description resource-paths main-plugin? jar-file]
                      :as   module-config}]
@@ -740,6 +753,30 @@
 
 (defn compile-tests [args]
   (run! #(compile-module % true) (module-info args)))
+
+(defn generate-ksp
+  "Generate all KSP files for production and test code across all modules.
+  Useful for IDE support while editing."
+  [args]
+  (let [modules (module-info args)
+        ;; Collect unique processor modules
+        processor-modules (->> modules
+                               (mapcat (fn [m]
+                                         [(get-in m [:ksp :processor-module])
+                                          (get-in m [:ksp-test :processor-module])]))
+                               (remove nil?)
+                               distinct)]
+    ;; Compile and build processor modules first
+    (doseq [proc-name processor-modules
+            :let [proc-module (get (:all-modules (first modules)) proc-name)]]
+      (compile-module proc-module)
+      (build-module proc-module))
+    ;; Run KSP for all modules
+    (doseq [m modules]
+      (when (:ksp m)
+        (run-module-ksp m false))
+      (when (:ksp-test m)
+        (run-module-ksp m true)))))
 
 (defn package [args]
   (let [plugin-config (edn/read-string (slurp "plugin.edn"))
