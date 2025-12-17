@@ -8,7 +8,8 @@
             [clojure.tools.build.api :as api]
             [clojure.tools.build.tasks.process :as process]
             [clojure.tools.build.util.file :as file]
-            [clojure.tools.build.util.zip :as zip])
+            [clojure.tools.build.util.zip :as zip]
+            [plugin-dev-tools.testing :as testing])
   (:import (java.io File FileOutputStream)
            (java.net URL URLClassLoader)
            (java.time LocalDateTime)
@@ -113,14 +114,18 @@
                                                          true)
                                    merge-into-main? (if (contains? details :merge-into-main?)
                                                       (:merge-into-main? details)
-                                                      false)]
+                                                      false)
+                                   intellij-tests? (if (contains? details :intellij-tests?)
+                                                     (:intellij-tests? details)
+                                                     true)]
                                (assoc ret module (assoc details :module module
                                                                 :module-path module-path
                                                                 :deps-file deps-file
                                                                 :jar-file jar-file
                                                                 :plugin-directory plugin-directory
                                                                 :include-in-sandbox? include-in-sandbox?
-                                                                :merge-into-main? merge-into-main?))))
+                                                                :merge-into-main? merge-into-main?
+                                                                :intellij-tests? intellij-tests?))))
                            (sorted-map)
                            (:modules config))
         deps-map (reduce (fn [ret {:keys [module depends ksp ksp-test]}]
@@ -672,7 +677,7 @@
           dir (plugin-directory modules)
           disabled-file "disabled_plugins.txt"
           sandbox-lib (str sandbox-dir "/plugins/" dir "/lib")]
-      (println "Preparing sandbox at" sandbox-lib)
+      (println (str "Preparing sandbox at " sandbox-dir " (plugin lib: plugins/" dir "/lib)"))
       (api/delete {:path (str sandbox-dir "/plugins")})
       (doseq [jar plugin-jars]
         (api/copy-file {:src    jar
@@ -791,3 +796,154 @@
     (let [formatter (DateTimeFormatter/ofPattern "uuuu-MM-dd HH:mm")
           now (LocalDateTime/now)]
       (println "Build finished at" (.format formatter now)))))
+
+;; =============================================================================
+;; Test Execution
+;; =============================================================================
+
+(defn- get-plugin-id
+  "Get the plugin ID from plugin.edn"
+  []
+  (let [config (edn/read-string (slurp "plugin.edn"))]
+    (:plugin-id config)))
+
+(defn- build-test-args
+  "Build JUnit test selection arguments from options.
+   Accepts :class, :method, or :package as symbols.
+   Method can use either foo.Bar.testMethod or foo.Bar#testMethod syntax."
+  [{:keys [class method package]}]
+  (cond
+    class ["-c" (str class)]
+    method (let [m (str method)
+                 ;; Convert foo.Bar.testMethod to foo.Bar#testMethod if needed
+                 m (if (str/includes? m "#")
+                     m
+                     ;; Find last dot and replace with #
+                     (if-let [idx (str/last-index-of m ".")]
+                       (str (subs m 0 idx) "#" (subs m (inc idx)))
+                       m))]
+             ["-m" m])
+    package ["-p" (str package)]
+    :else nil))
+
+(defn test-module
+  "Run tests for a single module.
+
+   Options from args:
+   - :class   - Test class to run (symbol, e.g. foo.BarTest)
+   - :method  - Test method to run (symbol, e.g. foo.BarTest.testSomething or foo.BarTest#testSomething)
+   - :package - Test package to run (symbol, e.g. foo.bar)
+
+   Uses :intellij-tests? from module config to determine whether to run with
+   IntelliJ test framework infrastructure or simple JUnit."
+  [module-config args]
+  (let [{:keys [intellij-tests? kotlin-test-paths java-test-paths module module-path]} module-config
+        test-args (build-test-args args)
+        test-output-dir (str "out/test/" module)
+        sandbox-dir (or (:sandbox-dir args) "sandbox/test")
+        ;; For submodules, run -Spath from their directory to get their deps
+        module-root (when (not= module-path ".") module-path)]
+
+    ;; Check if module has tests
+    (when (and (empty? kotlin-test-paths) (empty? java-test-paths))
+      (println "No test paths configured for module" module)
+      (System/exit 0))
+
+    ;; Compile production code and tests
+    (println "=== Testing module:" module "===")
+    (println)
+
+    (if intellij-tests?
+      ;; IntelliJ test framework execution
+      (let [intellij-sdk (testing/find-intellij-sdk)
+            _ (when-not intellij-sdk
+                (println "Error: Could not find IntelliJ SDK path in deps.edn")
+                (System/exit 1))
+            plugin-id (get-plugin-id)
+            _ (when-not plugin-id
+                (println "Error: :plugin-id not found in plugin.edn")
+                (System/exit 1))
+            product-info (testing/read-product-info intellij-sdk)
+            current-os (testing/detect-os)
+            current-arch (testing/detect-architecture)
+            launch-config (testing/find-launch-config product-info current-os current-arch)
+            _ (when-not launch-config
+                (println "Error: Could not find launch configuration for" current-os current-arch)
+                (System/exit 1))]
+
+        (println "Using IntelliJ SDK:" intellij-sdk)
+
+        (let [java-exec (testing/find-java-exec intellij-sdk)
+              test-classpath (testing/get-test-classpath [:test :test-exec :sdk]
+                                                         :project-root module-root)
+              _ (when-not test-classpath
+                  (println "Error: Failed to resolve test classpath")
+                  (System/exit 1))
+              full-classpath (str test-output-dir ":" test-classpath)
+              jvm-args (testing/intellij-test-jvm-args {:intellij-sdk  intellij-sdk
+                                                        :sandbox-dir   sandbox-dir
+                                                        :plugin-id     plugin-id
+                                                        :launch-config launch-config})
+              exit-code (testing/run-junit-tests {:java-exec      java-exec
+                                                  :jvm-args       jvm-args
+                                                  :classpath      full-classpath
+                                                  :scan-classpath test-output-dir
+                                                  :test-args      test-args})]
+          (when-not (zero? exit-code)
+            (System/exit exit-code))))
+
+      ;; Simple JUnit execution (no IntelliJ framework)
+      ;; For submodules, use :test alias only (not :test-exec which has root-relative paths)
+      ;; Use absolute paths since classpath is resolved from module dir but JUnit runs from root
+      (let [project-root (System/getProperty "user.dir")
+            abs-test-output (str project-root "/" test-output-dir)
+            abs-prod-output (str project-root "/out/production/" module)
+            test-classpath (testing/get-test-classpath [:test :test-exec] :project-root module-root)
+            _ (when-not test-classpath
+                (println "Error: Failed to resolve test classpath")
+                (System/exit 1))
+            full-classpath (str abs-test-output ":" abs-prod-output ":" test-classpath)
+            jvm-args (testing/simple-test-jvm-args)
+            exit-code (testing/run-junit-tests {:java-exec      "java"
+                                                :jvm-args       jvm-args
+                                                :classpath      full-classpath
+                                                :scan-classpath abs-test-output
+                                                :test-args      test-args})]
+        (when-not (zero? exit-code)
+          (System/exit exit-code))))))
+
+(defn run-tests
+  "Run tests for all modules that have test paths configured.
+
+   Options from args:
+   - :class   - Test class to run (symbol, e.g. foo.BarTest)
+   - :method  - Test method to run (symbol, e.g. foo.BarTest.testSomething or foo.BarTest#testSomething)
+   - :package - Test package to run (symbol, e.g. foo.bar)
+
+   Modules with :intellij-tests? true (default) run with IntelliJ test framework.
+   Modules with :intellij-tests? false run with simple JUnit.
+
+   Compiles production code, tests, and prepares sandbox before running tests."
+  [args]
+  (let [modules (module-info args)
+        testable-modules (filter #(or (seq (:kotlin-test-paths %))
+                                      (seq (:java-test-paths %)))
+                                 modules)
+        sandbox-dir (or (:sandbox-dir args) "sandbox/test")]
+
+    (when (empty? testable-modules)
+      (println "No modules with test paths found")
+      (System/exit 0))
+
+    ;; Compile production code and tests for all modules
+    (run! compile-module modules)
+    (run! #(compile-module % true) testable-modules)
+
+    (testing/setup-sandbox! sandbox-dir)
+    (prepare-sandbox {:sandbox-dir sandbox-dir})
+
+    (println "=== Running tests for" (count testable-modules) "modules ===")
+    (println)
+
+    (doseq [module-config testable-modules]
+      (test-module module-config args))))

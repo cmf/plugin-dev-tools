@@ -1,4 +1,5 @@
-{:deps        {babashka/fs                   {:mvn/version "0.5.26"}
+{:deps        {org.clojure/data.json          {:mvn/version "2.5.1"}
+               babashka/fs                   {:mvn/version "0.5.26"}
                babashka/curl                 {:git/url "https://github.com/babashka/babashka.curl"
                                               :git/sha "2187f908c033da45978512979c53bb53321120ce"}
                borkdude/rewrite-edn          {:git/url "https://github.com/borkdude/rewrite-edn"
