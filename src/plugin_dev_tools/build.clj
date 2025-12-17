@@ -575,9 +575,11 @@
     (if (or (empty? inputs)
             (needs-build? outputs inputs))
       (do
-        (doseq [dir (cons target generated-dirs)]
+        (when (fs/exists? target)
+          (fs/delete-tree target))
+        (doseq [dir generated-dirs]
           (when (fs/exists? dir)
-            (fs/delete-tree dir)))
+            (fs/create-dirs dir)))
         (doseq [dir (cons target generated-dirs)]
           (fs/create-dirs dir))
         (when (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
