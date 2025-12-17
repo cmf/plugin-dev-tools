@@ -6,11 +6,11 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.tools.build.api :as api]
-            [clojure.tools.build.api :as b]
             [clojure.tools.build.tasks.process :as process]
             [clojure.tools.build.util.file :as file]
             [clojure.tools.build.util.zip :as zip])
   (:import (java.io File FileOutputStream)
+           (java.net URL URLClassLoader)
            (java.time LocalDateTime)
            (java.time.format DateTimeFormatter)
            (java.util.zip ZipOutputStream)
@@ -24,7 +24,6 @@
 
 (def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all" "-language-version" "2.2"])
 
-
 ;; Config functions
 
 (defn plugin-version
@@ -32,7 +31,6 @@
   [plugin-config]
   (let [{:keys [base-version platform-version]} plugin-config]
     (str base-version \- platform-version)))
-
 
 (defn plugin-directory
   "Returns the name of the plugin directory in the zip file"
@@ -96,21 +94,6 @@
   "Returns elaborated module info from plugin.edn in dependency order."
   [args]
   (let [config (edn/read-string (slurp "plugin.edn"))
-        modules-config (:modules config)
-        modules-config (if (map? modules-config)
-                         modules-config
-                         (into (array-map)
-                               (map (fn [module-path]
-                                      (let [module-id (if (= module-path ".")
-                                                        "plugin"
-                                                        (if-let [index (str/last-index-of module-path "/")]
-                                                          (subs module-path (inc index))
-                                                          module-path))]
-                                        [module-id {:module-path  module-path
-                                                    :description  module-id
-                                                    :depends      []
-                                                    :main-plugin? (= module-path ".")}]))
-                                    modules-config)))
         modules (reduce-kv (fn [ret id details]
                              (let [module-path (or (:module-path details) id)
                                    module (if (= module-path ".")
@@ -158,7 +141,6 @@
             ret)
           ret)))))
 
-
 (defn clean [args]
   (let [modules (module-info args)
         dir (plugin-directory modules)
@@ -169,7 +151,7 @@
                     (str "sandbox/plugins/" dir "/lib")]
                    (map #(path-to % "build") modules))]
     (doseq [path dirs]
-      (b/delete {:path path}))))
+      (api/delete {:path path}))))
 
 (defn classpath-files
   "Return the files (non-directories) from a tools.build basis."
@@ -185,7 +167,7 @@
   [{:keys [basis javac-opts class-dir src-dirs extra-dirs]}]
   (let [{:keys [libs]} basis]
     (when (seq src-dirs)
-      (let [class-dir (file/ensure-dir (b/resolve-path class-dir))
+      (let [class-dir (file/ensure-dir (api/resolve-path class-dir))
             compiler (ToolProvider/getSystemJavaCompiler)
             listener (reify DiagnosticListener (report [_ diag] (println (str diag))))
             file-mgr (.getStandardFileManager compiler listener nil nil)
@@ -194,12 +176,12 @@
                                                        (into (mapcat :paths) (vals libs))
                                                        (conj class-dir-path)
                                                        (into (map (fn [dir]
-                                                                    (-> (b/resolve-path dir)
+                                                                    (-> (api/resolve-path dir)
                                                                         (file/ensure-dir)
                                                                         (.getPath))))
                                                              extra-dirs)))
             options (concat ["-classpath" classpath "-d" class-dir-path] javac-opts)
-            java-files (mapcat #(file/collect-files (b/resolve-path %) :collect (file/suffixes ".java")) src-dirs)
+            java-files (mapcat #(file/collect-files (api/resolve-path %) :collect (file/suffixes ".java")) src-dirs)
             file-objs (.getJavaFileObjectsFromFiles file-mgr java-files)
             task (.getTask compiler nil file-mgr listener options nil file-objs)
             success (.call task)]
@@ -221,7 +203,7 @@
     :or   {extra-paths [] headless? true}}]
   (let [{:keys [libs]} basis]
     (when (seq src-dirs)
-      (let [class-dir (file/ensure-dir (b/resolve-path class-dir))
+      (let [class-dir (file/ensure-dir (api/resolve-path class-dir))
             class-dir-path (.getPath class-dir)
             classpath (str/join File/pathSeparator (-> []
                                                        (into (mapcat :paths) (vals libs))
@@ -277,9 +259,9 @@
   "Return git describe output for HEAD in dir (default \".\")."
   ([] (git-revision "."))
   ([dir]
-   (-> (b/process {:command-args ["git" "describe" "--tags" "--always" "HEAD"]
-                   :dir          dir
-                   :out          :capture})
+   (-> (api/process {:command-args ["git" "describe" "--tags" "--always" "HEAD"]
+                     :dir          dir
+                     :out          :capture})
        :out
        str/trim)))
 
@@ -297,8 +279,8 @@
     :or   {base-dir "." description-path "description.html"}}]
   (when copy-resources?
     (doseq [dir resource-dirs]
-      (b/copy-dir {:src-dirs   [(str (io/file base-dir dir))]
-                   :target-dir target})))
+      (api/copy-dir {:src-dirs   [(str (io/file base-dir dir))]
+                     :target-dir target})))
   (let [rev (git-revision base-dir)
         description (slurp (str (io/file base-dir description-path)))
         now (-> (LocalDateTime/now)
@@ -395,10 +377,10 @@
         ksp-aliases (or ksp-aliases [:no-clojure :ksp-plugin])
         sdk-aliases (or sdk-aliases [:no-clojure :sdk])
         extra-jvm-opts (or extra-jvm-opts [])]
-    (binding [b/*project-root* project-root]
-      (let [ksp-basis (b/create-basis {:aliases (into ksp-aliases aliases)})
+    (binding [api/*project-root* project-root]
+      (let [ksp-basis (api/create-basis {:aliases (into ksp-aliases aliases)})
             ksp-cp (mapcat :paths (vals (:libs ksp-basis)))
-            libs-basis (b/create-basis {:aliases (into sdk-aliases aliases)})
+            libs-basis (api/create-basis {:aliases (into sdk-aliases aliases)})
             libs (mapcat :paths (vals (:libs libs-basis)))
             paths (map #(absolutize project-root %)
                        (or (seq src-dirs) (basis-source-roots libs-basis project-root)))
@@ -411,8 +393,8 @@
             main-present? (or (not ksp-main)
                               (not (seq ksp-cp))
                               (try
-                                (let [urls (into-array java.net.URL (map #(-> % io/file .toURI .toURL) ksp-cp))]
-                                  (with-open [loader (java.net.URLClassLoader. urls)]
+                                (let [urls (into-array URL (map #(-> % io/file .toURI .toURL) ksp-cp))]
+                                  (with-open [loader (URLClassLoader. urls)]
                                     (.loadClass loader ksp-main)))
                                 true
                                 (catch ClassNotFoundException _
@@ -447,7 +429,9 @@
                                           "-incremental=false"
                                           "-incremental-log=false"
                                           processor-jar]))]
-            (process/process {:command-args cmdline})))))))
+            (println (str/join " " cmdline))
+            (process/process {:command-args cmdline})
+            (prn (into [] (map File/.getPath) (file-seq (io/file output-dir))))))))))
 
 (defn- module-ksp-options
   "Build ksp-run options for a module config (or test variant).
@@ -461,10 +445,12 @@
           (throw (ex-info "Processor module not found" {:processor-module processor-module
                                                         :available        (keys all-modules)})))
         (let [processor-jar (:jar-file proc-info)
-              cache-dir (str (:module-path proc-info) "/build/caches")
+              cache-dir (str (when (not= (:module-path proc-info) ".")
+                               (str (:module-path proc-info) "/"))
+                             "build/caches")
               output-dir (str (when (not= module-path ".") (str module-path "/"))
                               (if test? "test/generated" "src/generated"))]
-          (merge {:project-root         module-path
+          (merge {:project-root         "."
                   :output-dir           output-dir
                   :cache-dir            cache-dir
                   :processor-jar        processor-jar
@@ -492,7 +478,7 @@
 (defn run-module-ksp
   "Invoke KSP for a module if configured. Returns nil when no KSP config."
   [module-config test?]
-  (when-let [{:keys [processor-jar] :as opts} (module-ksp-options module-config test?)]
+  (when-let [opts (module-ksp-options module-config test?)]
     (ensure-processor-jar (:processor-module (get module-config (if test? :ksp-test :ksp)))
                           (:all-modules module-config))
     (println "Running KSP for" (:description module-config) (if test? "(test)" ""))
@@ -518,7 +504,7 @@
                                    (let [p (str "out/production/" m)]
                                      (when (fs/directory? p)
                                        (.getAbsolutePath (io/file p))))))
-                           (cons module depends)))
+                           (into [module] depends)))
          dependency-dirs (if test?
                            (into [self-prod] dep-prod-dirs)
                            dep-prod-dirs)
@@ -572,21 +558,18 @@
                        [(:deps-file module-config)
                         "plugin.edn"]])
          outputs (into [target] generated-dirs)]
-    (if (or (empty? inputs)
-            (needs-build? outputs inputs))
-      (do
-        (when (fs/exists? target)
-          (fs/delete-tree target))
-        (doseq [dir generated-dirs]
-          (when (fs/exists? dir)
-            (fs/create-dirs dir)))
-        (doseq [dir (cons target generated-dirs)]
-          (fs/create-dirs dir))
-        (when (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
-          (println "Compiling" description (if test? "tests" "") "(no sources found, only KSP/resources may run)"))
-        (run-module-ksp module-config false)
-        (when test? (run-module-ksp module-config true))
-        (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
+     (if (or (empty? inputs)
+             (needs-build? outputs inputs))
+       (do
+         (doseq [dir (into [target] generated-dirs)]
+           (when (fs/exists? dir)
+             (fs/delete-tree dir))
+           (fs/create-dirs dir))
+         (when (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
+           (println "Compiling" description (if test? "tests" "") "(no sources found, only KSP/resources may run)"))
+         (run-module-ksp module-config false)
+         (when test? (run-module-ksp module-config true))
+         (when-not (and (empty? java-paths) (empty? kotlin-paths) (empty? clojure-paths))
            (println "Compiling" description (if test? "tests" ""))
            (when-not (empty? kotlin-paths)
              (println " - compiling Kotlin")
@@ -609,9 +592,8 @@
              (api/compile-clj {:src-dirs  clojure-paths
                                :class-dir target
                                :basis     (update basis :classpath
-                                                  assoc target {:path-key :paths})}))))
-       (println "Skipping" description (if test? "tests" "") "- up to date")))))
-
+                                                  assoc target {:path-key :paths})})))
+         (println "Skipping" description (if test? "tests" "") "- up to date"))))))
 
 (defn build-module [{:keys [module module-path description resource-paths main-plugin? jar-file]
                      :as   module-config}]
@@ -678,23 +660,23 @@
           disabled-file "disabled_plugins.txt"
           sandbox-lib (str sandbox-dir "/plugins/" dir "/lib")]
       (println "Preparing sandbox at" sandbox-lib)
-      (b/delete {:path (str sandbox-dir "/plugins")})
+      (api/delete {:path (str sandbox-dir "/plugins")})
       (doseq [jar plugin-jars]
-        (b/copy-file {:src    jar
-                      :target (str sandbox-lib "/" (.getName (io/file jar)))}))
+        (api/copy-file {:src    jar
+                        :target (str sandbox-lib "/" (.getName (io/file jar)))}))
       (when basis
         (doseq [root (classpath-files basis)]
-          (b/copy-file {:src    root
-                        :target (str sandbox-lib "/" (.getName (io/file root)))})))
+          (api/copy-file {:src    root
+                          :target (str sandbox-lib "/" (.getName (io/file root)))})))
       ;(doseq [{:keys [src target]} extra-copies]
       ;  (if (fs/directory? src)
-      ;    (b/copy-dir {:src-dirs   [src]
+      ;    (api/copy-dir {:src-dirs   [src]
       ;                 :target-dir target})
-      ;    (b/copy-file {:src src :target target})))
+      ;    (api/copy-file {:src src :target target})))
       (when disabled-file
         (file/ensure-dir (str sandbox-dir "/config"))
-        (b/copy-file {:src    disabled-file
-                      :target (str sandbox-dir "/config/disabled_plugins.txt")})))))
+        (api/copy-file {:src    disabled-file
+                        :target (str sandbox-dir "/config/disabled_plugins.txt")})))))
 
 (defn copy-to-zip
   "Copy a directory tree into a ZipOutputStream, preserving relative paths under root."
@@ -716,13 +698,12 @@
     :output-dir     Override output dir (default \"build/distributions\")."
   [{:keys [plugin-module plugin-directory sandbox-dir plugin-version output-dir]
     :or   {sandbox-dir "sandbox" output-dir "build/distributions"}}]
-  (let [zip-file (b/resolve-path (str output-dir "/" plugin-module "-" plugin-version ".zip"))
-        class-dir (file/ensure-dir (b/resolve-path (str sandbox-dir "/plugins")))
-        plugin-dir (file/ensure-dir (b/resolve-path (str sandbox-dir "/plugins/" plugin-directory)))]
+  (let [zip-file (api/resolve-path (str output-dir "/" plugin-module "-" plugin-version ".zip"))
+        class-dir (file/ensure-dir (api/resolve-path (str sandbox-dir "/plugins")))
+        plugin-dir (file/ensure-dir (api/resolve-path (str sandbox-dir "/plugins/" plugin-directory)))]
     (file/ensure-dir (.getParent zip-file))
     (with-open [zos (ZipOutputStream. (FileOutputStream. zip-file))]
       (copy-to-zip zos class-dir plugin-dir))))
-
 
 (defn verify-plugin
   "Download (if needed) and invoke IntelliJ Plugin Verifier.
