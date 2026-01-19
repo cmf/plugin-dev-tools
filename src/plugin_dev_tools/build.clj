@@ -265,11 +265,11 @@
       (> newest-input newest-output) true
       :else false)))
 
-(defn git-revision
-  "Return git describe output for HEAD in dir (default \".\")."
-  ([] (git-revision "."))
+(defn jj-revision
+  "Return jj revision ID in dir (default \".\")."
+  ([] (jj-revision "."))
   ([dir]
-   (-> (api/process {:command-args ["git" "describe" "--tags" "--always" "HEAD"]
+   (-> (api/process {:command-args ["jj" "log" "-r" "@-" "--no-graph" "-T" "change_id.short() ++ \" \" ++ commit_id.short(8) ++ \"\\n\""]
                      :dir          dir
                      :out          :capture})
        :out
@@ -291,7 +291,7 @@
     (doseq [dir resource-dirs]
       (api/copy-dir {:src-dirs   [(str (io/file base-dir dir))]
                      :target-dir target})))
-  (let [rev (git-revision base-dir)
+  (let [rev (jj-revision base-dir)
         description (slurp (str (io/file base-dir description-path)))
         now (-> (LocalDateTime/now)
                 (.format (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm")))
