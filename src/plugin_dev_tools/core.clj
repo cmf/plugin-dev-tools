@@ -47,6 +47,9 @@
                                        (ensure/download-plugin plugin-spec))
                                      plugin-spec)))]
 
+        ; Ensure project-local SDK symlink exists so deps.edn can use relative paths
+        (ensure/ensure-project-sdks-symlink!)
+
         ; Now update deps.edn files with resolved version and plugin info
         (doseq [deps-file (->> (build/module-info args)
                                (map :deps-file)

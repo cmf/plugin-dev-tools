@@ -1,10 +1,27 @@
 (ns plugin-dev-tools.ensure-test
-  (:require [clojure.test :refer :all]
-            [plugin-dev-tools.ensure :as ensure]
+  (:require [babashka.fs :as fs]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [babashka.fs :as fs])
+            [clojure.test :refer :all]
+            [plugin-dev-tools.ensure :as ensure])
   (:import (java.io File)))
+
+(defmacro with-temp-project
+  "Create a temporary project directory and execute body.
+
+  Returns bindings:
+  - project-dir: Path to temp project root
+  - sdks-cache:  Path to temp directory pretending to be ~/.sdks
+  - sdks-link:   Path to project-local link ./sdks"
+  [[project-dir sdks-cache sdks-link] & body]
+  `(let [~project-dir (fs/create-temp-dir {:prefix "plugin-dev-tools-ensure-test"})
+         ~sdks-cache (fs/file ~project-dir ".sdks")
+         ~sdks-link (fs/file ~project-dir "sdks")]
+     (try
+       (fs/create-dirs ~sdks-cache)
+       ~@body
+       (finally
+         (fs/delete-tree ~project-dir)))))
 
 (deftest test-sdks-dir
   (testing "returns correct SDK directory path"
@@ -39,65 +56,87 @@
           actual (ensure/sdk-url "snapshots" version)]
       (is (= expected actual)))))
 
+(deftest test-ensure-project-sdks-symlink
+  (with-temp-project [project-dir sdks-cache sdks-link]
+    (testing "creates a project-local sdks symlink when missing"
+      (is (not (fs/exists? sdks-link)))
+      (ensure/ensure-project-sdks-symlink! sdks-link sdks-cache)
+      (is (fs/exists? sdks-link))
+      ;; Only assert symlink-ness when supported.
+      (when-let [sym-link? (resolve 'babashka.fs/sym-link?)]
+        (is (sym-link? sdks-link))))))
+
 (deftest test-update-deps-edn
-  (testing "updates intellij dependency paths"
+  (with-temp-project [project-dir sdks-cache sdks-link]
     (let [version "2023.1.1"
-          input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path/2023.1.0\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")
-          parsed (edn/read-string result)
-          expected-path (.getAbsolutePath (io/file (ensure/sdks-dir) version))]
-      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))))
+          deps-file (fs/file project-dir "deps.edn")]
+      ;; Make link exist (not required for rewrite, but matches real usage)
+      (ensure/ensure-project-sdks-symlink! sdks-link sdks-cache)
 
-  (testing "updates intellij sources dependency paths"
-    (let [version "2023.1.1"
-          input "{:aliases {:sdk {:extra-deps {intellij/sdk$sources {:local/root \"/old/path/ideaIC-2023.1.0-sources.jar\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")
-          parsed (edn/read-string result)
-          expected-path (.getAbsolutePath (ensure/sources-file version))]
-      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk$sources :local/root])))))
+      (testing "updates intellij dependency paths (relative)"
+        (let [input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path/2023.1.0\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= (str "sdks/" version)
+                 (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))))
 
-  (testing "updates plugin dependency paths"
-    (let [version "2023.1.1"
-          input "{:aliases {:sdk {:extra-deps {plugin/kotlin {:local/root \"/old/path/2023.1.0/plugins/kotlin\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")
-          parsed (edn/read-string result)
-          expected-path (.getAbsolutePath (io/file (ensure/sdks-dir) version "plugins" "kotlin"))]
-      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'plugin/kotlin :local/root])))))
+      (testing "updates intellij sources dependency paths (relative)"
+        (let [input "{:aliases {:sdk {:extra-deps {intellij/sdk$sources {:local/root \"/old/path/ideaIC-2023.1.0-sources.jar\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= (str "sdks/ideaIC-" version "-sources.jar")
+                 (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk$sources :local/root])))))
 
-  (testing "updates both :sdk and :ide aliases"
-    (let [version "2023.1.1"
-          input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path/2023.1.0\"}}}
-                            :ide {:extra-deps {intellij/ide {:local/root \"/old/path/2023.1.0\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")
-          parsed (edn/read-string result)
-          expected-path (.getAbsolutePath (io/file (ensure/sdks-dir) version))]
-      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
-      (is (= expected-path (get-in parsed [:aliases :ide :extra-deps 'intellij/ide :local/root])))))
+      (testing "updates plugin dependency paths (relative)"
+        (let [input "{:aliases {:sdk {:extra-deps {plugin/kotlin {:local/root \"/old/path/2023.1.0/plugins/kotlin\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= (str "sdks/" version "/plugins/kotlin")
+                 (get-in parsed [:aliases :sdk :extra-deps 'plugin/kotlin :local/root])))))
 
-  (testing "preserves formatting"
-    (let [version "2023.1.1"
-          input "; Comment\n{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")]
-      (is (re-find #"; Comment" result))))
+      (testing "updates both :sdk and :ide aliases (relative)"
+        (let [input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path/2023.1.0\"}}}\n                                  :ide {:extra-deps {intellij/ide {:local/root \"/old/path/2023.1.0\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= (str "sdks/" version)
+                 (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
+          (is (= (str "sdks/" version)
+                 (get-in parsed [:aliases :ide :extra-deps 'intellij/ide :local/root])))))
 
-  (testing "leaves non-intellij/plugin dependencies unchanged"
-    (let [version "2023.1.1"
-          input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path\"}\n                                          other/library {:mvn/version \"1.0.0\"}}}}}"
-          _ (spit "/tmp/test-ensure-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-ensure-deps.edn" version)
-          result (slurp "/tmp/test-ensure-deps.edn")
-          parsed (edn/read-string result)]
-      (is (= "1.0.0" (get-in parsed [:aliases :sdk :extra-deps 'other/library :mvn/version]))))))
+      (testing "rewrites are relative to the deps.edn location"
+        (let [sub-deps (fs/file project-dir "modules/foo/deps.edn")
+              input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path/2023.1.0\"}}}}}"
+              _ (fs/create-dirs (fs/parent sub-deps))
+              _ (spit sub-deps input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str sub-deps) version))
+              parsed (edn/read-string (slurp sub-deps))]
+          (is (= (str "../../sdks/" version)
+                 (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))))
+
+      (testing "preserves formatting"
+        (let [input "; Comment\n{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              result (slurp deps-file)]
+          (is (re-find #"; Comment" result))))
+
+      (testing "leaves non-intellij/plugin dependencies unchanged"
+        (let [input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/path\"}\n                                                other/library {:mvn/version \"1.0.0\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= "1.0.0" (get-in parsed [:aliases :sdk :extra-deps 'other/library :mvn/version]))))))))
 
 (deftest test-maven-metadata-url
   (testing "constructs correct metadata URL for releases"
@@ -124,47 +163,10 @@
     (is (= "241" (ensure/marketing-version->branch "2024.1")))))
 
 (def sample-release-metadata-xml
-  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<metadata>
-  <groupId>com.jetbrains.intellij.idea</groupId>
-  <artifactId>ideaIU</artifactId>
-  <versioning>
-    <latest>2025.2.3</latest>
-    <release>2025.2.3</release>
-    <versions>
-      <version>2024.3</version>
-      <version>2024.3.1</version>
-      <version>2024.3.7</version>
-      <version>2025.1</version>
-      <version>2025.1.6</version>
-      <version>2025.2</version>
-      <version>2025.2.1</version>
-      <version>2025.2.3</version>
-    </versions>
-  </versioning>
-</metadata>")
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<metadata>\n  <groupId>com.jetbrains.intellij.idea</groupId>\n  <artifactId>ideaIU</artifactId>\n  <versioning>\n    <latest>2025.2.3</latest>\n    <release>2025.2.3</release>\n    <versions>\n      <version>2024.3</version>\n      <version>2024.3.1</version>\n      <version>2024.3.7</version>\n      <version>2025.1</version>\n      <version>2025.1.6</version>\n      <version>2025.2</version>\n      <version>2025.2.1</version>\n      <version>2025.2.3</version>\n    </versions>\n  </versioning>\n</metadata>")
 
 (def sample-snapshot-metadata-xml
-  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<metadata>
-  <groupId>com.jetbrains.intellij.idea</groupId>
-  <artifactId>ideaIU</artifactId>
-  <versioning>
-    <latest>253.25908.13-EAP-SNAPSHOT</latest>
-    <versions>
-      <version>LATEST-EAP-SNAPSHOT</version>
-      <version>242-EAP-SNAPSHOT</version>
-      <version>243-EAP-SNAPSHOT</version>
-      <version>251-EAP-SNAPSHOT</version>
-      <version>252-EAP-SNAPSHOT</version>
-      <version>252.26830.24-EAP-SNAPSHOT</version>
-      <version>253-EAP-SNAPSHOT</version>
-      <version>253.20558.43-EAP-SNAPSHOT</version>
-      <version>253.25908-EAP-CANDIDATE-SNAPSHOT</version>
-      <version>253.25908.13-EAP-SNAPSHOT</version>
-    </versions>
-  </versioning>
-</metadata>")
+  "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<metadata>\n  <groupId>com.jetbrains.intellij.idea</groupId>\n  <artifactId>ideaIU</artifactId>\n  <versioning>\n    <latest>253.25908.13-EAP-SNAPSHOT</latest>\n    <versions>\n      <version>LATEST-EAP-SNAPSHOT</version>\n      <version>242-EAP-SNAPSHOT</version>\n      <version>243-EAP-SNAPSHOT</version>\n      <version>251-EAP-SNAPSHOT</version>\n      <version>252-EAP-SNAPSHOT</version>\n      <version>252.26830.24-EAP-SNAPSHOT</version>\n      <version>253-EAP-SNAPSHOT</version>\n      <version>253.20558.43-EAP-SNAPSHOT</version>\n      <version>253.25908-EAP-CANDIDATE-SNAPSHOT</version>\n      <version>253.25908.13-EAP-SNAPSHOT</version>\n    </versions>\n  </versioning>\n</metadata>")
 
 (deftest test-parse-maven-metadata
   (testing "parses release metadata correctly"
@@ -254,40 +256,42 @@
       (is (= expected actual)))))
 
 (deftest test-update-deps-edn-with-marketplace-plugins
-  (testing "updates marketplace-plugin dependency paths"
+  (with-temp-project [project-dir sdks-cache sdks-link]
     (let [version "2023.1.1"
-          plugins [{:id "kotlin" :version "1.9.0"}]
-          input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
-          _ (spit "/tmp/test-marketplace-plugin-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-marketplace-plugin-deps.edn" version plugins)
-          result (slurp "/tmp/test-marketplace-plugin-deps.edn")
-          parsed (edn/read-string result)
-          expected-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))]
-      (is (= expected-path (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
+          deps-file (fs/file project-dir "deps.edn")]
+      (ensure/ensure-project-sdks-symlink! sdks-link sdks-cache)
 
-  (testing "leaves marketplace-plugin unchanged if plugin not in list"
-    (let [version "2023.1.1"
-          plugins []
-          input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
-          _ (spit "/tmp/test-marketplace-plugin-missing.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-marketplace-plugin-missing.edn" version plugins)
-          result (slurp "/tmp/test-marketplace-plugin-missing.edn")
-          parsed (edn/read-string result)]
-      (is (= "/old/path/kotlin" (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
+      (testing "updates marketplace-plugin dependency paths (relative)"
+        (let [plugins [{:id "kotlin" :version "1.9.0"}]
+              input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version plugins))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= "sdks/plugins/kotlin/1.9.0"
+                 (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
 
-  (testing "updates both intellij and marketplace-plugin dependencies"
-    (let [version "2023.1.1"
-          plugins [{:id "kotlin" :version "1.9.0"}]
-          input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/sdk\"}
-                                                marketplace-plugin/kotlin {:local/root \"/old/kotlin\"}}}}}"
-          _ (spit "/tmp/test-mixed-deps.edn" input)
-          _ (ensure/update-deps-edn "/tmp/test-mixed-deps.edn" version plugins)
-          result (slurp "/tmp/test-mixed-deps.edn")
-          parsed (edn/read-string result)
-          expected-sdk-path (.getAbsolutePath (io/file (ensure/sdks-dir) version))
-          expected-plugin-path (.getAbsolutePath (ensure/plugin-dir "kotlin" "1.9.0"))]
-      (is (= expected-sdk-path (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
-      (is (= expected-plugin-path (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root]))))))
+      (testing "leaves marketplace-plugin unchanged if plugin not in list"
+        (let [plugins []
+              input "{:aliases {:sdk {:extra-deps {marketplace-plugin/kotlin {:local/root \"/old/path/kotlin\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version plugins))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= "/old/path/kotlin"
+                 (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root])))))
+
+      (testing "updates both intellij and marketplace-plugin dependencies (relative)"
+        (let [plugins [{:id "kotlin" :version "1.9.0"}]
+              input "{:aliases {:sdk {:extra-deps {intellij/sdk {:local/root \"/old/sdk\"}\n                                                    marketplace-plugin/kotlin {:local/root \"/old/kotlin\"}}}}}"
+              _ (spit deps-file input)
+              _ (with-redefs [ensure/project-sdks-link (fn [] (io/file (str sdks-link)))]
+                  (ensure/update-deps-edn (str deps-file) version plugins))
+              parsed (edn/read-string (slurp deps-file))]
+          (is (= (str "sdks/" version)
+                 (get-in parsed [:aliases :sdk :extra-deps 'intellij/sdk :local/root])))
+          (is (= "sdks/plugins/kotlin/1.9.0"
+                 (get-in parsed [:aliases :sdk :extra-deps 'marketplace-plugin/kotlin :local/root]))))))))
 
 (deftest test-process-plugin-with-nested-lib-directory
   (testing "handles plugin with lib/ in subdirectory using fs/file with Path objects"

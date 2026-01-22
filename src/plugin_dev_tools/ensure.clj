@@ -12,6 +12,27 @@
 (defn sdks-dir []
   (io/file (System/getProperty "user.home") ".sdks"))
 
+(defn project-sdks-link
+  "Project-local path (relative to user.dir) where deps.edn will point to SDKs.
+
+  This is expected to be a symlink to ~/.sdks (created by ensure-sdk)."
+  []
+  (io/file "sdks"))
+
+(defn ensure-project-sdks-symlink!
+  "Ensure there is a project-local symlink at ./sdks pointing to ~/.sdks.
+
+  This lets deps.edn use relative paths like sdks/<version> which stay stable
+  across macOS/Linux home directory differences." 
+  ([]
+   (ensure-project-sdks-symlink! (project-sdks-link) (sdks-dir)))
+  ([link target]
+   (let [link (fs/file link)
+         target (fs/file target)]
+     (when-not (fs/exists? link)
+       (println "Creating sdks symlink" (str link) "->" (str target))
+       (fs/create-sym-link link target)))))
+
 (defn ^File zipfile [version]
   (io/file (sdks-dir) (str "ideaIU-" version ".zip")))
 
@@ -297,8 +318,24 @@
     (process-sdk version)
     version))
 
+(defn- deps-relative-path
+  "Return a relative path string from the deps.edn file's directory to target.
+
+  target is expected to be a path relative to the project root (user.dir),
+  e.g. (io/file sdks version)."
+  [deps-file target]
+  (let [deps-path (fs/file deps-file)
+        deps-dir (or (fs/parent deps-path) (fs/file "."))
+        rel (fs/relativize (fs/absolutize deps-dir)
+                           (fs/absolutize target))]
+    (str rel)))
+
 (defn update-deps-edn
   "Update deps.edn file with SDK and plugin paths.
+
+  The rewritten :local/root paths are *relative* to each deps.edn file so they
+  remain stable across different machines/OSes.
+
   version: The IntelliJ SDK version
   plugins: Collection of plugin specs with :id and :version (optional, defaults to empty vector)"
   ([file-name version]
@@ -307,7 +344,7 @@
    (let [deps-edn-string (slurp file-name)
          nodes (rewrite/parse-string deps-edn-string)
          edn (edn/read-string deps-edn-string)
-         ; Create a map of plugin-id -> version for lookup
+         ;; Create a map of plugin-id -> version for lookup
          plugin-map (into {} (map (fn [{:keys [id version]}] [id version]) plugins))
          nodes (reduce (fn [nodes alias]
                          (let [keys (filter #(#{"intellij" "plugin" "marketplace-plugin"} (namespace %))
@@ -317,22 +354,28 @@
                                        (cond
                                          (.endsWith (name key) "$sources")
                                          (rewrite/assoc-in nodes target
-                                                           (.getAbsolutePath (io/file (sdks-dir) (str "ideaIC-" version "-sources.jar"))))
+                                                           (deps-relative-path file-name
+                                                                              (fs/file (project-sdks-link)
+                                                                                       (str "ideaIC-" version "-sources.jar"))))
+
                                          (= "intellij" (namespace key))
                                          (rewrite/assoc-in nodes target
-                                                           (.getAbsolutePath (io/file (sdks-dir) version)))
+                                                           (deps-relative-path file-name
+                                                                              (fs/file (project-sdks-link) version)))
+
                                          (= "plugin" (namespace key))
-                                         (let [previous (get-in edn target)
-                                               file (io/file previous)
-                                               name (.getName file)]
-                                           (rewrite/assoc-in nodes target
-                                                             (.getAbsolutePath (io/file (sdks-dir) version "plugins" name))))
+                                         (rewrite/assoc-in nodes target
+                                                           (deps-relative-path file-name
+                                                                              (fs/file (project-sdks-link) version "plugins" (name key))))
+
                                          (= "marketplace-plugin" (namespace key))
                                          (let [plugin-id (name key)
                                                plugin-version (get plugin-map plugin-id)]
                                            (if plugin-version
                                              (rewrite/assoc-in nodes target
-                                                               (.getAbsolutePath (plugin-dir plugin-id plugin-version)))
+                                                               (deps-relative-path file-name
+                                                                                  (fs/file (project-sdks-link)
+                                                                                           "plugins" plugin-id plugin-version)))
                                              nodes))
                                          :else nodes)))
                                    nodes
