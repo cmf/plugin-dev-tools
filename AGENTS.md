@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AGENTS.md
 
 Concise notes for working here:
 - Purpose: Clojure tooling for Kotlin/Java IntelliJ plugins (CLI + build lib). Avoids Gradle.
@@ -6,3 +6,4 @@ Concise notes for working here:
 - CLI (`plugin-dev-tools.core`): `clj -Tplugin ensure-sdk` downloads SDK/plugins to `~/.sdks`, rewrites module `deps.edn` roots; `clj -Tplugin ensure-kotlin` rewrites Kotlin/serialization/coroutines/KSP versions.
 - Build lib (`plugin-dev-tools.build`): main entry points `compile`, `compile-tests`, `package`; KSP runs declaratively from module blocks and will build processor modules as needed; helpers for `ksp-run`, `kotlinc`, `javac`, sandbox prep, plugin.xml update, verifier.
 - `deps.edn` rewrites preserve formatting via `borkdude.rewrite-edn`. Plugins/SDK stored under `~/.sdks/` and `~/.sdks/plugins/{id}/{version}/`.
+- Release: `jj commit -m "..."`, move `main` bookmark to the new commit (`jj bookmark move main -t @-`), tag (`jj tag set <version> -r @-`), `jj git push -b main`, then push the tag with `git push origin <version>`.

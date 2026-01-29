@@ -785,9 +785,11 @@
 
 (defn package [args]
   (let [plugin-config (edn/read-string (slurp "plugin.edn"))
-        modules (module-info args)]
-    (clean args)
-    (run! compile-module modules)
+        modules (module-info args)
+        {:keys [compile] :or {compile true}} args]
+    (when compile
+      (clean args)
+      (run! compile-module modules))
     (sync-kotlinc-plugin)
     (prepare-sandbox args)
     (package-plugin {:plugin-module    (plugin-module modules)
