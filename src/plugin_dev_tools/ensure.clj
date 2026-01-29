@@ -2,12 +2,18 @@
   (:require [babashka.curl :as curl]
             [babashka.fs :as fs]
             [borkdude.rewrite-edn :as rewrite]
+            [clojure.data.json :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.java.shell :refer [sh]]
+            [clojure.set :as set]
             [clojure.string :as str]
             [clojure.xml :as xml])
-  (:import (java.io File)))
+  (:import (java.io File)
+           (java.util.jar JarFile)))
+
+(declare maybe-write-test-framework-deps!)
+(declare deps-relative-path)
 
 (defn sdks-dir []
   (io/file (System/getProperty "user.home") ".sdks"))
@@ -282,7 +288,8 @@
                             (remove #(str/includes? (fs/file-name %) "jps-plugin"))
                             (map #(fs/relativize plugin %))
                             (mapv str))]
-              (spit (str plugin "/deps.edn") (pr-str (merge aliases {:paths jars}))))))))))
+              (spit (str plugin "/deps.edn") (pr-str (merge aliases {:paths jars}))))))
+        (maybe-write-test-framework-deps! sdk-file version)))))
 
 (defn download-sdk
   "Downloads SDK for the given marketing version. Returns the resolved full version."
@@ -318,6 +325,266 @@
     (process-sdk version)
     version))
 
+;; =============================================================================
+;; Test framework exclusions
+;; =============================================================================
+
+(def ^:private kotlin-stdlib-exclusions
+  #{'org.jetbrains.kotlin/kotlin-stdlib
+    'org.jetbrains.kotlin/kotlin-stdlib-jdk8})
+
+(def ^:private coroutines-exclusions
+  (let [groups ["org.jetbrains.kotlinx"
+                "com.intellij.platform"
+                "org.jetbrains.intellij.deps.kotlinx"]
+        artifacts ["kotlinx-coroutines-core-jvm"
+                   "kotlinx-coroutines-jdk8"
+                   "kotlinx-coroutines-core"
+                   "kotlinx-coroutines-debug"
+                   "kotlinx-coroutines-guava"
+                   "kotlinx-coroutines-slf4j"
+                   "kotlinx-coroutines-test"]]
+    (set (for [group groups
+               artifact artifacts]
+           (symbol (str group "/" artifact))))))
+
+(def ^:private explicit-exclusions
+  (set (concat
+        ['junit/junit
+         'org.hamcrest/hamcrest-core
+         'org.jetbrains/jetCheck
+         'org.jetbrains.teamcity/serviceMessages]
+        kotlin-stdlib-exclusions
+        coroutines-exclusions)))
+
+(def ^:private fallback-exclusions
+  #{'com.jetbrains.intellij.java/java-resources-en
+    'com.jetbrains.intellij.java/java-rt
+    'com.jetbrains.intellij.platform/boot
+    'com.jetbrains.intellij.platform/code-style-impl
+    'com.jetbrains.intellij.platform/core-ui
+    'com.jetbrains.intellij.platform/execution-impl
+    'com.jetbrains.intellij.platform/ide-impl
+    'com.jetbrains.intellij.platform/ide-util-io-impl
+    'com.jetbrains.intellij.platform/ide-util-io
+    'com.jetbrains.intellij.platform/ide-util-netty
+    'com.jetbrains.intellij.platform/images
+    'com.jetbrains.intellij.platform/lang-impl
+    'com.jetbrains.intellij.platform/lang
+    'com.jetbrains.intellij.platform/resources
+    'com.jetbrains.intellij.platform/service-container
+    'com.jetbrains.intellij.platform/util-class-loader
+    'com.jetbrains.intellij.platform/util-jdom
+    'com.jetbrains.intellij.platform/workspace-model-jps
+    'com.jetbrains.intellij.platform/workspace-model-storage
+    'com.jetbrains.intellij.regexp/regexp
+    'com.jetbrains.intellij.xml/xml-dom-impl
+    'com.jetbrains.intellij.java/java-compiler-impl
+    'com.jetbrains.intellij.java/java-debugger-impl
+    'com.jetbrains.intellij.java/java-execution-impl
+    'com.jetbrains.intellij.java/java-execution
+    'com.jetbrains.intellij.java/java-impl-refactorings
+    'com.jetbrains.intellij.java/java-impl
+    'com.jetbrains.intellij.java/java-plugin
+    'com.jetbrains.intellij.java/java-ui
+    'com.jetbrains.intellij.java/java
+    'com.jetbrains.intellij.platform/external-system-impl
+    'com.jetbrains.intellij.platform/jps-build
+    'com.jetbrains.intellij.platform/util})
+
+(defn- detect-os
+  "Detect current operating system, returning the format used in product-info.json."
+  []
+  (let [os-name (str/lower-case (System/getProperty "os.name"))]
+    (cond
+      (str/includes? os-name "mac") "macOS"
+      (str/includes? os-name "linux") "Linux"
+      (str/includes? os-name "windows") "Windows"
+      :else (do
+              (println "Warning: Unknown OS" os-name)
+              nil))))
+
+(defn- normalize-resource-path [path]
+  (when path
+    (loop [path path]
+      (let [path (str/replace path "\\" "/")]
+        (if (str/starts-with? path "../")
+          (recur (subs path 3))
+          path)))))
+
+(defn- read-product-info [sdk-dir]
+  (let [product-info-path (io/file sdk-dir "product-info.json")]
+    (when (fs/exists? product-info-path)
+      (json/read-str (slurp product-info-path) :key-fn keyword))))
+
+(defn- product-info-classpath
+  [sdk-dir]
+  (when-let [product-info (read-product-info sdk-dir)]
+    (let [os (detect-os)
+          launch (first (filter #(= os (:os %)) (:launch product-info)))
+          boot (->> (:bootClassPathJarNames launch)
+                    (map #(str "lib/" %)))
+          layout (->> (:layout product-info)
+                      (filter #(= "com.intellij" (:name %)))
+                      (mapcat :classPath))]
+      (->> (concat boot layout)
+           (remove #{"lib/junit4.jar" "lib/junit.jar" "lib/testFramework.jar"})
+           (map normalize-resource-path)
+           set))))
+
+(defn- bundled-plugin-jars
+  [sdk-dir]
+  (let [plugins-dir (io/file sdk-dir "plugins")]
+    (if (fs/exists? plugins-dir)
+      (->> (fs/list-dir plugins-dir)
+           (filter fs/directory?)
+           (mapcat (fn [plugin-dir]
+                     (let [lib-dir (fs/file plugin-dir "lib")
+                           modules-dir (fs/file plugin-dir "lib" "modules")]
+                       (concat (when (fs/exists? lib-dir)
+                                 (fs/glob lib-dir "*.jar"))
+                               (when (fs/exists? modules-dir)
+                                 (fs/glob modules-dir "*.jar"))))))
+           (map #(fs/relativize sdk-dir %))
+           (map str)
+           (map normalize-resource-path)
+           set)
+      #{})))
+
+(defn- collected-jar-paths [sdk-dir]
+  (set/union (or (product-info-classpath sdk-dir) #{})
+             (bundled-plugin-jars sdk-dir)))
+
+(defn- module-name->coordinates
+  [module-name]
+  (let [segments (str/split module-name #"[\.\s]+")]
+    (when (>= (count segments) 2)
+      (let [group-id (str "com.jetbrains." (str/join "." (take 2 segments)))
+            remaining (rest segments)
+            remaining (if (#{"platform" "vcs" "cloud"} (first remaining))
+                        (rest remaining)
+                        remaining)]
+        (when (seq remaining)
+          (let [artifact-id (->> remaining
+                                 (map #(str/replace % #"([a-z])([A-Z])" "$1-$2"))
+                                 (map str/lower-case)
+                                 (str/join "-"))]
+            (symbol (str group-id "/" artifact-id))))))))
+
+(defn- module-resource-path
+  [module-descriptor]
+  (->> (:content module-descriptor)
+       (filter #(= :resources (:tag %)))
+       first
+       :content
+       (filter #(= :resource-root (:tag %)))
+       first
+       :attrs
+       :path
+       normalize-resource-path))
+
+(defn- module-descriptor-exclusions
+  [sdk-dir]
+  (let [module-descriptors (io/file sdk-dir "modules" "module-descriptors.jar")
+        collected (collected-jar-paths sdk-dir)]
+    (when (fs/exists? module-descriptors)
+      (with-open [jar-file (JarFile. module-descriptors)]
+        (reduce (fn [acc entry]
+                  (if (str/ends-with? (.getName entry) ".xml")
+                    (let [descriptor (with-open [stream (.getInputStream jar-file entry)]
+                                       (xml/parse stream))
+                          module-name (get-in descriptor [:attrs :name])
+                          resource-path (module-resource-path descriptor)
+                          coordinate (when (and module-name
+                                                resource-path
+                                                (contains? collected resource-path))
+                                       (module-name->coordinates module-name))]
+                      (if coordinate
+                        (conj acc coordinate)
+                        acc))
+                    acc))
+                #{}
+                (enumeration-seq (.entries jar-file)))))))
+
+(defn test-framework-exclusions
+  "Return exclusions for the IntelliJ test framework dependency based on SDK contents."
+  [sdk-dir]
+  (let [sdk-dir (fs/file sdk-dir)
+        module-exclusions (module-descriptor-exclusions sdk-dir)
+        exclusions (if (seq module-exclusions)
+                     (set/union module-exclusions explicit-exclusions)
+                     (set/union fallback-exclusions explicit-exclusions))]
+    (->> exclusions
+         (sort-by str)
+         vec)))
+
+(def ^:private test-framework-min-version "2026.1")
+
+(defn- version-parts [version]
+  (->> (str/split (or version "") #"\.")
+       (map #(or (some->> (re-find #"\d+" %) parse-long) 0))
+       vec))
+
+(defn- version>=? [version required]
+  (let [left (version-parts version)
+        right (version-parts required)
+        size (max (count left) (count right))
+        left (vec (take size (concat left (repeat 0))))
+        right (vec (take size (concat right (repeat 0))))]
+    (not (neg? (compare left right)))))
+
+(defn- supports-test-framework-deps? [sdk-dir]
+  (when-let [product-info (read-product-info sdk-dir)]
+    (version>=? (:version product-info) test-framework-min-version)))
+
+(defn- write-test-framework-deps! [sdk-dir version exclusions]
+  (let [target (fs/file sdk-dir "test-framework")
+        deps {:deps {'com.jetbrains.intellij.platform/test-framework {:mvn/version version
+                                                                      :exclusions exclusions}}}]
+    (fs/create-dirs target)
+    (spit (fs/file target "deps.edn") (pr-str deps))))
+
+(defn maybe-write-test-framework-deps!
+  "Create a test-framework deps.edn file inside the SDK when supported.
+  Returns true when the file is written."
+  [sdk-dir version]
+  (let [sdk-dir (fs/file sdk-dir)]
+    (when (supports-test-framework-deps? sdk-dir)
+      (write-test-framework-deps! sdk-dir version (test-framework-exclusions sdk-dir))
+      true)))
+
+(def ^:private test-framework-dep-keys
+  ['com.jetbrains.intellij.platform/test-framework
+   'intellij/test-framework])
+
+(defn- update-test-framework-exclusions
+  [nodes edn exclusions]
+  (let [aliases (keys (:aliases edn))
+        dep-key 'com.jetbrains.intellij.platform/test-framework]
+    (reduce (fn [nodes alias]
+              (let [extra-deps (get-in edn [:aliases alias :extra-deps])]
+                (if (and extra-deps (contains? extra-deps dep-key))
+                  (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key :exclusions] (vec exclusions))
+                  nodes)))
+            nodes
+            aliases)))
+
+(defn- update-test-framework-local-root
+  [nodes edn deps-file version]
+  (let [aliases (keys (:aliases edn))
+        rel-path (deps-relative-path deps-file
+                                     (fs/file (project-sdks-link) version "test-framework"))]
+    (reduce (fn [nodes alias]
+              (reduce (fn [nodes dep-key]
+                        (if (contains? (get-in edn [:aliases alias :extra-deps]) dep-key)
+                          (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key]
+                                            {:local/root rel-path})
+                          nodes))
+                      nodes
+                      test-framework-dep-keys))
+            nodes
+            aliases)))
+
 (defn- deps-relative-path
   "Return a relative path string from the deps.edn file's directory to target.
 
@@ -337,10 +604,13 @@
   remain stable across different machines/OSes.
 
   version: The IntelliJ SDK version
-  plugins: Collection of plugin specs with :id and :version (optional, defaults to empty vector)"
+  plugins: Collection of plugin specs with :id and :version (optional, defaults to empty vector)
+  test-framework-exclusions: Collection of exclusions for com.jetbrains.intellij.platform/test-framework"
   ([file-name version]
-   (update-deps-edn file-name version []))
+   (update-deps-edn file-name version [] nil))
   ([file-name version plugins]
+   (update-deps-edn file-name version plugins nil))
+  ([file-name version plugins test-framework-exclusions]
    (let [deps-edn-string (slurp file-name)
          nodes (rewrite/parse-string deps-edn-string)
          edn (edn/read-string deps-edn-string)
@@ -359,9 +629,12 @@
                                                                                        (str "ideaIC-" version "-sources.jar"))))
 
                                          (= "intellij" (namespace key))
-                                         (rewrite/assoc-in nodes target
-                                                           (deps-relative-path file-name
-                                                                              (fs/file (project-sdks-link) version)))
+                                         (let [sdk-root (fs/file (project-sdks-link) version)
+                                               sdk-path (if (= "test-framework" (name key))
+                                                          (fs/file sdk-root "test-framework")
+                                                          sdk-root)]
+                                           (rewrite/assoc-in nodes target
+                                                             (deps-relative-path file-name sdk-path)))
 
                                          (= "plugin" (namespace key))
                                          (rewrite/assoc-in nodes target
@@ -381,7 +654,17 @@
                                    nodes
                                    keys)))
                        nodes
-                       [:sdk :ide])]
+                       [:sdk :ide])
+         nodes (cond
+                 (= test-framework-exclusions :clear)
+                 (-> nodes
+                     (update-test-framework-local-root edn file-name version)
+                     (update-test-framework-exclusions edn []))
+
+                 (seq test-framework-exclusions)
+                 (update-test-framework-exclusions nodes edn test-framework-exclusions)
+
+                 :else nodes)]
      (spit file-name (str nodes)))))
 
 (comment

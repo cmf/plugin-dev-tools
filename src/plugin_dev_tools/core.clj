@@ -50,11 +50,18 @@
         ; Ensure project-local SDK symlink exists so deps.edn can use relative paths
         (ensure/ensure-project-sdks-symlink!)
 
-        ; Now update deps.edn files with resolved version and plugin info
-        (doseq [deps-file (->> (build/module-info args)
-                               (map :deps-file)
-                               distinct)]
-          (ensure/update-deps-edn deps-file resolved-version downloaded-plugins))))
+        (let [supports-test-framework? (ensure/maybe-write-test-framework-deps! sdk resolved-version)
+              test-framework-exclusions (when-not supports-test-framework?
+                                          (ensure/test-framework-exclusions sdk))
+              test-framework-update (if supports-test-framework?
+                                      :clear
+                                      test-framework-exclusions)]
+
+          ; Now update deps.edn files with resolved version and plugin info
+          (doseq [deps-file (->> (build/module-info args)
+                                 (map :deps-file)
+                                 distinct)]
+            (ensure/update-deps-edn deps-file resolved-version downloaded-plugins test-framework-update)))))
     (catch Exception e
       (println (str "Error: "
                     (.getMessage e)
