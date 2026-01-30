@@ -85,13 +85,16 @@
   (with-temp-dir [project-dir]
     (let [deps-file (fs/file project-dir "deps.edn")
           sdks-link (fs/file project-dir "sdks")
-          module-content "{:aliases {:sdk {:extra-deps {intellij/test-framework {:local/root \"/old/path\"}}}}}"
+          module-content (str "{:aliases {:sdk {:extra-deps {intellij/test-framework {:local/root \"/old/path\"}\n"
+                              "                                 intellij/java-test-framework {:local/root \"/old/java\"}}}}}")
           _ (spit deps-file module-content)
           _ (with-redefs [ensure/project-sdks-link (fn [] sdks-link)]
               (ensure/update-deps-edn (str deps-file) "261.17801.55-EAP-SNAPSHOT" [] :clear))
           result (edn/read-string (slurp deps-file))]
       (is (= "sdks/261.17801.55-EAP-SNAPSHOT/test-framework"
-             (get-in result [:aliases :sdk :extra-deps 'intellij/test-framework :local/root]))))))
+             (get-in result [:aliases :sdk :extra-deps 'intellij/test-framework :local/root])))
+      (is (= "sdks/261.17801.55-EAP-SNAPSHOT/java-test-framework"
+             (get-in result [:aliases :sdk :extra-deps 'intellij/java-test-framework :local/root]))))))
 
 (deftest test-test-framework-deps-created-for-2026-1
   (with-temp-dir [sdk-dir]
@@ -104,13 +107,25 @@
                            :layout [{:name "com.intellij"
                                      :classPath ["lib/intellij.platform.ide.impl.jar"]}]}))
     (ensure/maybe-write-test-framework-deps! sdk-dir "261.17801.55-EAP-SNAPSHOT")
-    (let [deps-file (fs/file sdk-dir "test-framework" "deps.edn")
-          result (edn/read-string (slurp deps-file))]
-      (is (= "261.17801.55-EAP-SNAPSHOT"
-             (get-in result [:deps 'com.jetbrains.intellij.platform/test-framework :mvn/version])))
-      (is (contains? (set (get-in result [:deps 'com.jetbrains.intellij.platform/test-framework :exclusions]))
-                     'com.jetbrains.intellij.platform/ide-impl))
-      (is (nil? (:mvn/repos result))))))
+    (let [frameworks {"test-framework" 'com.jetbrains.intellij.platform/test-framework
+                      "test-framework-junit5" 'com.jetbrains.intellij.platform/test-framework-junit5
+                      "java-test-framework" 'com.jetbrains.intellij.java/java-test-framework}
+          base (edn/read-string (slurp (fs/file sdk-dir "test-framework" "deps.edn")))
+          base-exclusions (set (get-in base [:deps 'com.jetbrains.intellij.platform/test-framework :exclusions]))]
+      (doseq [[dir coord] frameworks]
+        (let [deps-file (fs/file sdk-dir dir "deps.edn")
+              result (edn/read-string (slurp deps-file))]
+          (is (= "261.17801.55-EAP-SNAPSHOT"
+                 (get-in result [:deps coord :mvn/version])))
+          (is (= base-exclusions
+                 (set (get-in result [:deps coord :exclusions]))))
+          (is (= [] (:paths result)))
+          (is (= '{:no-clojure {:classpath-overrides {org.clojure/clojure          ""
+                                                       org.clojure/spec.alpha       ""
+                                                       org.clojure/core.specs.alpha ""}}
+                    :test       {:extra-paths []}}
+                 (:aliases result)))
+          (is (nil? (:mvn/repos result))))))))
 
 (deftest test-test-framework-deps-not-created-before-2026-1
   (with-temp-dir [sdk-dir]
@@ -123,4 +138,5 @@
                            :layout [{:name "com.intellij"
                                      :classPath ["lib/intellij.platform.ide.impl.jar"]}]}))
     (ensure/maybe-write-test-framework-deps! sdk-dir "2025.3.1.1")
-    (is (not (fs/exists? (fs/file sdk-dir "test-framework" "deps.edn"))))))
+    (is (not (fs/exists? (fs/file sdk-dir "test-framework" "deps.edn"))))
+    (is (not (fs/exists? (fs/file sdk-dir "java-test-framework" "deps.edn"))))))

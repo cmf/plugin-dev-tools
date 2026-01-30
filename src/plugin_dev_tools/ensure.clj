@@ -520,6 +520,32 @@
 
 (def ^:private test-framework-min-version "2026.1")
 
+(def ^:private test-framework-aliases
+  '{:no-clojure {:classpath-overrides {org.clojure/clojure          ""
+                                       org.clojure/spec.alpha       ""
+                                       org.clojure/core.specs.alpha ""}}
+    :test       {:extra-paths []}})
+
+(def ^:private test-framework-coordinates
+  ['com.jetbrains.intellij.platform/test-framework
+   'com.jetbrains.intellij.platform/test-framework-junit5
+   'com.jetbrains.intellij.css/css-test-framework
+   'com.jetbrains.intellij.platform/debugger-test-framework
+   'com.jetbrains.intellij.platform/external-system-test-framework
+   'com.jetbrains.intellij.go/go-test-framework
+   'com.jetbrains.intellij.idea/ruby-test-framework
+   'com.jetbrains.intellij.java/java-test-framework
+   'com.jetbrains.intellij.javascript/javascript-test-framework
+   'com.jetbrains.intellij.platform/lsp-test-framework
+   'com.jetbrains.intellij.maven/maven-test-framework
+   'com.jetbrains.intellij.platform/poly-symbols-test-framework
+   'com.jetbrains.intellij.qodana/qodana-test-framework
+   'com.jetbrains.intellij.resharper/resharper-test-framework
+   'com.jetbrains.intellij.platform/uast-test-framework
+   'com.jetbrains.intellij.platform/vcs-test-framework
+   'com.jetbrains.intellij.xml/xml-test-framework
+   'com.jetbrains.intellij.platform/web-symbols-test-framework])
+
 (defn- version-parts [version]
   (->> (str/split (or version "") #"\.")
        (map #(or (some->> (re-find #"\d+" %) parse-long) 0))
@@ -537,51 +563,54 @@
   (when-let [product-info (read-product-info sdk-dir)]
     (version>=? (:version product-info) test-framework-min-version)))
 
-(defn- write-test-framework-deps! [sdk-dir version exclusions]
-  (let [target (fs/file sdk-dir "test-framework")
-        deps {:deps {'com.jetbrains.intellij.platform/test-framework {:mvn/version version
-                                                                      :exclusions exclusions}}}]
+(defn- write-test-framework-deps! [sdk-dir version coord exclusions]
+  (let [target (fs/file sdk-dir (name coord))
+        deps {:paths []
+              :deps {coord {:mvn/version version
+                            :exclusions exclusions}}
+              :aliases test-framework-aliases}]
     (fs/create-dirs target)
     (spit (fs/file target "deps.edn") (pr-str deps))))
 
 (defn maybe-write-test-framework-deps!
-  "Create a test-framework deps.edn file inside the SDK when supported.
-  Returns true when the file is written."
+  "Create test-framework deps.edn files inside the SDK when supported.
+  Returns true when the files are written."
   [sdk-dir version]
   (let [sdk-dir (fs/file sdk-dir)]
     (when (supports-test-framework-deps? sdk-dir)
-      (write-test-framework-deps! sdk-dir version (test-framework-exclusions sdk-dir))
+      (let [exclusions (test-framework-exclusions sdk-dir)]
+        (doseq [coord test-framework-coordinates]
+          (write-test-framework-deps! sdk-dir version coord exclusions)))
       true)))
-
-(def ^:private test-framework-dep-keys
-  ['com.jetbrains.intellij.platform/test-framework
-   'intellij/test-framework])
 
 (defn- update-test-framework-exclusions
   [nodes edn exclusions]
-  (let [aliases (keys (:aliases edn))
-        dep-key 'com.jetbrains.intellij.platform/test-framework]
+  (let [aliases (keys (:aliases edn))]
     (reduce (fn [nodes alias]
-              (let [extra-deps (get-in edn [:aliases alias :extra-deps])]
-                (if (and extra-deps (contains? extra-deps dep-key))
-                  (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key :exclusions] (vec exclusions))
-                  nodes)))
+              (reduce (fn [nodes dep-key]
+                        (if (contains? (get-in edn [:aliases alias :extra-deps]) dep-key)
+                          (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key :exclusions] (vec exclusions))
+                          nodes))
+                      nodes
+                      test-framework-coordinates))
             nodes
             aliases)))
 
 (defn- update-test-framework-local-root
   [nodes edn deps-file version]
-  (let [aliases (keys (:aliases edn))
-        rel-path (deps-relative-path deps-file
-                                     (fs/file (project-sdks-link) version "test-framework"))]
+  (let [aliases (keys (:aliases edn))]
     (reduce (fn [nodes alias]
-              (reduce (fn [nodes dep-key]
-                        (if (contains? (get-in edn [:aliases alias :extra-deps]) dep-key)
-                          (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key]
-                                            {:local/root rel-path})
-                          nodes))
-                      nodes
-                      test-framework-dep-keys))
+              (let [extra-deps (get-in edn [:aliases alias :extra-deps])]
+                (reduce (fn [nodes dep-key]
+                          (let [dep-name (name dep-key)]
+                            (if (and (= "intellij" (namespace dep-key))
+                                     (str/includes? dep-name "test-framework"))
+                              (rewrite/assoc-in nodes [:aliases alias :extra-deps dep-key]
+                                                {:local/root (deps-relative-path deps-file
+                                                                                (fs/file (project-sdks-link) version dep-name))})
+                              nodes)))
+                        nodes
+                        (keys extra-deps))))
             nodes
             aliases)))
 
@@ -630,8 +659,9 @@
 
                                          (= "intellij" (namespace key))
                                          (let [sdk-root (fs/file (project-sdks-link) version)
-                                               sdk-path (if (= "test-framework" (name key))
-                                                          (fs/file sdk-root "test-framework")
+                                               dep-name (name key)
+                                               sdk-path (if (str/includes? dep-name "test-framework")
+                                                          (fs/file sdk-root dep-name)
                                                           sdk-root)]
                                            (rewrite/assoc-in nodes target
                                                              (deps-relative-path file-name sdk-path)))
