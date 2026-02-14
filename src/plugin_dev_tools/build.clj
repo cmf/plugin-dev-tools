@@ -11,13 +11,13 @@
             [clojure.tools.build.util.zip :as zip]
             [plugin-dev-tools.testing :as testing])
   (:import (java.io File FileOutputStream)
-           (java.net URL URLClassLoader)
+           (java.net ServerSocket URL URLClassLoader)
            (java.time LocalDateTime)
            (java.time.format DateTimeFormatter)
            (java.util.zip ZipOutputStream)
            (javax.tools DiagnosticListener ToolProvider)))
 
-(declare build-module)
+(declare build-module get-plugin-id)
 
 (def jvm-target "21")
 
@@ -798,6 +798,170 @@
     (let [formatter (DateTimeFormatter/ofPattern "uuuu-MM-dd HH:mm")
           now (LocalDateTime/now)]
       (println "Build finished at" (.format formatter now)))))
+
+;; =============================================================================
+;; IDE Execution
+;; =============================================================================
+
+(defn- debug-enabled?
+  [{:keys [debug]}]
+  (cond
+    (true? debug) true
+    (false? debug) false
+    (string? debug) (contains? #{"1" "true" "yes" "y" "on"}
+                                (str/lower-case (str/trim debug)))
+    :else false))
+
+(defn- find-free-port
+  []
+  (with-open [socket (ServerSocket. 0)]
+    (.setReuseAddress socket true)
+    (.getLocalPort socket)))
+
+(defn- parse-debug-port
+  [port]
+  (cond
+    (nil? port) nil
+    (integer? port) (int port)
+    (number? port) (int port)
+    (string? port) (try
+                     (Integer/parseInt (str/trim port))
+                     (catch NumberFormatException _
+                       nil))
+    :else nil))
+
+(defn- resolve-debug-port
+  [args]
+  (when (debug-enabled? args)
+    (let [provided-port (cond
+                          (contains? args :debug-port) (:debug-port args)
+                          (contains? args :port) (:port args)
+                          :else nil)
+          parsed-port (if (some? provided-port)
+                        (parse-debug-port provided-port)
+                        (find-free-port))]
+      (when-not (and parsed-port (<= 1 parsed-port 65535))
+        (throw (ex-info "Invalid :debug-port/:port, expected integer in range 1-65535"
+                        {:debug-port (:debug-port args)
+                         :port (:port args)})))
+      parsed-port)))
+
+(defn- ide-jvm-args
+  [{:keys [intellij-sdk sandbox-dir plugin-id launch-config current-os debug-port]}]
+  (let [vm-opts-path (when-let [path (:vmOptionsFilePath launch-config)]
+                       (str intellij-sdk "/" path))
+        vm-opts (or (testing/load-vm-options vm-opts-path) [])
+        launch-jvm-args (->> (:additionalJvmArguments launch-config)
+                             (map #(testing/resolve-path-variables % intellij-sdk)))
+        ide-props ["-Didea.classpath.index.enabled=false"
+                   "-Didea.is.internal=true"
+                   "-Didea.plugin.in.sandbox.mode=true"
+                   "-Didea.vendor.name=JetBrains"
+                   "-Dide.no.platform.update=false"
+                   "-Djdk.module.illegalAccess.silent=true"
+                   (str "-Didea.config.path=" sandbox-dir "/config")
+                   (str "-Didea.plugins.path=" sandbox-dir "/plugins")
+                   (str "-Didea.system.path=" sandbox-dir "/system")
+                   (str "-Didea.log.path=" sandbox-dir "/system/log")
+                   (str "-Didea.required.plugins.id=" plugin-id)
+                   "-Didea.auto.reload.plugins=true"
+                   "-Dide.native.launcher=false"
+                   "-Djava.system.class.loader=com.intellij.util.lang.PathClassLoader"]
+        platform-props (case current-os
+                         "macOS" ["-Didea.smooth.progress=false"
+                                   "-Dapple.laf.useScreenMenuBar=true"
+                                   "-Dapple.awt.fileDialogForDirectories=true"]
+                         "Linux" ["-Dsun.awt.disablegrab=true"]
+                         [])
+        debug-arg (when debug-port
+                    (str "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:" debug-port))]
+    (concat vm-opts
+            launch-jvm-args
+            ide-props
+            platform-props
+            (when debug-arg [debug-arg]))))
+
+(defn- ide-classpath
+  [intellij-sdk launch-config]
+  (let [lib-dir (str intellij-sdk "/lib")
+        boot-jars (or (:bootClassPathJarNames launch-config)
+                      ["3rd-party-rt.jar" "jna.jar" "util.jar" "util_rt.jar"])
+        jar-paths (->> boot-jars
+                       (map #(str lib-dir "/" %))
+                       (filter fs/exists?))]
+    (when (empty? jar-paths)
+      (throw (ex-info "Could not resolve IDE boot classpath jars"
+                      {:boot-jars boot-jars :lib-dir lib-dir})))
+    (str/join File/pathSeparator jar-paths)))
+
+(defn run-ide
+  "Run the IDE with current plugin in sandbox.
+
+   Options from args:
+   - :sandbox-dir  Sandbox dir (default \"sandbox\")
+   - :debug        Optional flag to start IDE with JDWP enabled
+   - :debug-port   Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
+
+   Compiles all modules, prepares sandbox, starts IDE, prints PID/debug port, and waits for IDE exit."
+  [args]
+  (let [modules (module-info args)
+        sandbox-dir (or (:sandbox-dir args) "sandbox")
+        intellij-sdk (testing/find-intellij-sdk)
+        _ (when-not intellij-sdk
+            (println "Error: Could not find IntelliJ SDK path in deps.edn")
+            (System/exit 1))
+        plugin-id (get-plugin-id)
+        _ (when-not plugin-id
+            (println "Error: :plugin-id not found in plugin.edn")
+            (System/exit 1))
+        product-info (testing/read-product-info intellij-sdk)
+        current-os (testing/detect-os)
+        current-arch (testing/detect-architecture)
+        launch-config (testing/find-launch-config product-info current-os current-arch)
+        _ (when-not launch-config
+            (println "Error: Could not find launch configuration for" current-os current-arch)
+            (System/exit 1))
+        debug-port (try
+                     (resolve-debug-port args)
+                     (catch Exception e
+                       (println "Error:" (.getMessage e))
+                       (System/exit 1)))]
+
+    (println "Compiling modules...")
+    (run! compile-module modules)
+
+    (testing/setup-sandbox! sandbox-dir)
+    (prepare-sandbox {:sandbox-dir sandbox-dir})
+
+    (println "Using IntelliJ SDK:" intellij-sdk)
+
+    (let [java-exec (testing/find-java-exec intellij-sdk)
+          jvm-args (ide-jvm-args {:intellij-sdk  intellij-sdk
+                                  :sandbox-dir   sandbox-dir
+                                  :plugin-id     plugin-id
+                                  :launch-config launch-config
+                                  :current-os    current-os
+                                  :debug-port    debug-port})
+          classpath (ide-classpath intellij-sdk launch-config)
+          main-class (or (:mainClass launch-config) "com.intellij.idea.Main")
+          bin-dir (str intellij-sdk "/bin")
+          command (into [java-exec]
+                        (concat jvm-args
+                                ["-classpath" classpath
+                                 main-class]))
+          pb (ProcessBuilder. ^java.util.List command)]
+      (.directory pb (io/file bin-dir))
+      (.inheritIO pb)
+
+      (println "Launching IDE...")
+      (let [ide-process (.start pb)
+            pid (.pid ide-process)]
+        (println "IDE PID:" pid)
+        (when debug-port
+          (println "Debug port:" debug-port))
+        (let [exit-code (.waitFor ide-process)]
+          (when-not (zero? exit-code)
+            (System/exit exit-code)))))))
 
 ;; =============================================================================
 ;; Test Execution

@@ -35,3 +35,25 @@
   (let [{:keys [compile clean]} (run-package {:compile false})]
     (is (= 0 clean))
     (is (= 0 compile))))
+
+(deftest test-debug-enabled?
+  (is (true? (#'build/debug-enabled? {:debug true})))
+  (is (true? (#'build/debug-enabled? {:debug "true"})))
+  (is (true? (#'build/debug-enabled? {:debug "yes"})))
+  (is (false? (#'build/debug-enabled? {})))
+  (is (false? (#'build/debug-enabled? {:debug false})))
+  (is (false? (#'build/debug-enabled? {:debug "no"}))))
+
+(deftest test-resolve-debug-port
+  (with-redefs [build/find-free-port (fn [] 43123)]
+    (is (nil? (#'build/resolve-debug-port {:debug false})))
+    (is (= 43123 (#'build/resolve-debug-port {:debug true})))
+    (is (= 5005 (#'build/resolve-debug-port {:debug true :debug-port 5005})))
+    (is (= 5006 (#'build/resolve-debug-port {:debug true :debug-port "5006"})))
+    (is (= 5007 (#'build/resolve-debug-port {:debug true :port 5007})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Invalid :debug-port/:port"
+                          (#'build/resolve-debug-port {:debug true :debug-port "abc"})))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Invalid :debug-port/:port"
+                          (#'build/resolve-debug-port {:debug true :debug-port 70000})))))
