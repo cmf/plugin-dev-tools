@@ -1,5 +1,7 @@
 (ns plugin-dev-tools.build-test
-  (:require [clojure.test :refer :all]
+  (:require [babashka.fs :as fs]
+            [clojure.data.json :as json]
+            [clojure.test :refer :all]
             [plugin-dev-tools.build :as build]))
 
 (defn- run-package
@@ -57,3 +59,69 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"Invalid :debug-port/:port"
                           (#'build/resolve-debug-port {:debug true :debug-port 70000})))))
+
+(deftest test-ide-params-prints-launch-json
+  (let [compile-calls (atom 0)
+        sandbox-calls (atom 0)
+        prepared (atom nil)
+        expected-sandbox (str (fs/absolutize "sandbox"))
+        stdout (with-out-str
+                 (with-redefs [build/module-info (fn [_] [{:module "main"}])
+                               build/compile-module (fn [_] (swap! compile-calls inc))
+                               plugin-dev-tools.testing/setup-sandbox! (fn [_] (swap! sandbox-calls inc))
+                               build/prepare-sandbox (fn [args] (reset! prepared args))
+                               plugin-dev-tools.testing/find-intellij-sdk (fn [] "/sdk")
+                               build/get-plugin-id (fn [] "com.example.plugin")
+                               plugin-dev-tools.testing/read-product-info (fn [_] {:launch []})
+                               plugin-dev-tools.testing/detect-os (fn [] "Linux")
+                               plugin-dev-tools.testing/detect-architecture (fn [] "amd64")
+                               plugin-dev-tools.testing/find-launch-config (fn [& _]
+                                                                             {:mainClass "com.intellij.idea.Main"
+                                                                              :bootClassPathJarNames ["a.jar" "b.jar"]
+                                                                              :additionalJvmArguments ["-Dfoo=$IDE_HOME"]})
+                               plugin-dev-tools.testing/find-java-exec (fn [_] "/java/bin/java")
+                               plugin-dev-tools.testing/load-vm-options (fn [_] ["-Xmx2g"])
+                               babashka.fs/exists? (fn [path]
+                                                     (contains? #{"/sdk/lib/a.jar" "/sdk/lib/b.jar"} (str path)))]
+                   (build/ide-params {})))
+        params (json/read-str stdout :key-fn keyword)]
+    (is (= 1 @compile-calls))
+    (is (= 1 @sandbox-calls))
+    (is (= {:sandbox-dir expected-sandbox} @prepared))
+    (is (= 1 (:version params)))
+    (is (= "/sdk/bin" (:cwd params)))
+    (is (= "/java/bin/java" (:javaPath params)))
+    (is (= {:major 21 :jbr true} (:javaRequirements params)))
+    (is (= "com.intellij.idea.Main" (:mainClass params)))
+    (is (= ["/sdk/lib/a.jar" "/sdk/lib/b.jar"] (:classpathEntries params)))
+    (is (= [] (:appArgs params)))
+    (is (some #(= "-Xmx2g" %) (:vmArgs params)))
+    (is (some #(= "-Dfoo=/sdk" %) (:vmArgs params)))
+    (is (some #(= "-Dsun.awt.disablegrab=true" %) (:vmArgs params)))
+    (is (some #(= (str "-Didea.config.path=" expected-sandbox "/config") %) (:vmArgs params)))))
+
+(deftest test-ide-params-includes-debug-port-when-enabled
+  (let [stdout (with-out-str
+                 (with-redefs [build/module-info (fn [_] [{:module "main"}])
+                               build/compile-module (fn [_] nil)
+                               plugin-dev-tools.testing/setup-sandbox! (fn [_] nil)
+                               build/prepare-sandbox (fn [_] nil)
+                               plugin-dev-tools.testing/find-intellij-sdk (fn [] "/sdk")
+                               build/get-plugin-id (fn [] "com.example.plugin")
+                               plugin-dev-tools.testing/read-product-info (fn [_] {:launch []})
+                               plugin-dev-tools.testing/detect-os (fn [] "Linux")
+                               plugin-dev-tools.testing/detect-architecture (fn [] "amd64")
+                               plugin-dev-tools.testing/find-launch-config (fn [& _]
+                                                                             {:mainClass "com.intellij.idea.Main"
+                                                                              :bootClassPathJarNames ["a.jar"]
+                                                                              :additionalJvmArguments []})
+                               plugin-dev-tools.testing/find-java-exec (fn [_] "/java/bin/java")
+                               plugin-dev-tools.testing/load-vm-options (fn [_] [])
+                               build/find-free-port (fn [] 43123)
+                               babashka.fs/exists? (fn [path]
+                                                     (= "/sdk/lib/a.jar" (str path)))]
+                   (build/ide-params {:debug true})))
+        params (json/read-str stdout :key-fn keyword)]
+    (is (= 43123 (:debugPort params)))
+    (is (some #(= "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:43123" %)
+              (:vmArgs params)))))

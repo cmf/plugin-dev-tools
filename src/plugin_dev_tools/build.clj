@@ -1,6 +1,7 @@
 (ns plugin-dev-tools.build
   (:refer-clojure :exclude [compile])
   (:require [babashka.fs :as fs]
+            [clojure.data.json :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.set :as set]
@@ -881,51 +882,50 @@
             platform-props
             (when debug-arg [debug-arg]))))
 
-(defn- ide-classpath
+(defn- ide-classpath-entries
   [intellij-sdk launch-config]
   (let [lib-dir (str intellij-sdk "/lib")
         boot-jars (or (:bootClassPathJarNames launch-config)
                       ["3rd-party-rt.jar" "jna.jar" "util.jar" "util_rt.jar"])
         jar-paths (->> boot-jars
                        (map #(str lib-dir "/" %))
-                       (filter fs/exists?))]
+                       (filter fs/exists?)
+                       vec)]
     (when (empty? jar-paths)
       (throw (ex-info "Could not resolve IDE boot classpath jars"
                       {:boot-jars boot-jars :lib-dir lib-dir})))
-    (str/join File/pathSeparator jar-paths)))
+    jar-paths))
 
-(defn run-ide
-  "Run the IDE with current plugin in sandbox.
+(defn- fail!
+  [message]
+  (binding [*out* *err*]
+    (println "Error:" message))
+  (System/exit 1))
 
-   Options from args:
-   - :sandbox-dir  Sandbox dir (default \"sandbox\")
-   - :debug        Optional flag to start IDE with JDWP enabled
-   - :debug-port   Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
+(defn- absolute-path
+  [path]
+  (some-> path fs/absolutize str))
 
-   Compiles all modules, prepares sandbox, starts IDE, prints PID/debug port, and waits for IDE exit."
+(defn- ide-launch-params
   [args]
   (let [modules (module-info args)
-        sandbox-dir (or (:sandbox-dir args) "sandbox")
-        intellij-sdk (testing/find-intellij-sdk)
+        sandbox-dir (absolute-path (or (:sandbox-dir args) "sandbox"))
+        intellij-sdk (some-> (testing/find-intellij-sdk) absolute-path)
         _ (when-not intellij-sdk
-            (println "Error: Could not find IntelliJ SDK path in deps.edn")
-            (System/exit 1))
+            (fail! "Could not find IntelliJ SDK path in deps.edn"))
         plugin-id (get-plugin-id)
         _ (when-not plugin-id
-            (println "Error: :plugin-id not found in plugin.edn")
-            (System/exit 1))
+            (fail! ":plugin-id not found in plugin.edn"))
         product-info (testing/read-product-info intellij-sdk)
         current-os (testing/detect-os)
         current-arch (testing/detect-architecture)
         launch-config (testing/find-launch-config product-info current-os current-arch)
         _ (when-not launch-config
-            (println "Error: Could not find launch configuration for" current-os current-arch)
-            (System/exit 1))
+            (fail! (str "Could not find launch configuration for " current-os " " current-arch)))
         debug-port (try
                      (resolve-debug-port args)
                      (catch Exception e
-                       (println "Error:" (.getMessage e))
-                       (System/exit 1)))]
+                       (fail! (.getMessage e))))]
 
     (println "Compiling modules...")
     (run! compile-module modules)
@@ -936,32 +936,44 @@
     (println "Using IntelliJ SDK:" intellij-sdk)
 
     (let [java-exec (testing/find-java-exec intellij-sdk)
-          jvm-args (ide-jvm-args {:intellij-sdk  intellij-sdk
-                                  :sandbox-dir   sandbox-dir
-                                  :plugin-id     plugin-id
-                                  :launch-config launch-config
-                                  :current-os    current-os
-                                  :debug-port    debug-port})
-          classpath (ide-classpath intellij-sdk launch-config)
+          jvm-args (vec (ide-jvm-args {:intellij-sdk  intellij-sdk
+                                       :sandbox-dir   sandbox-dir
+                                       :plugin-id     plugin-id
+                                       :launch-config launch-config
+                                       :current-os    current-os
+                                       :debug-port    debug-port}))
+          classpath-entries (ide-classpath-entries intellij-sdk launch-config)
           main-class (or (:mainClass launch-config) "com.intellij.idea.Main")
-          bin-dir (str intellij-sdk "/bin")
-          command (into [java-exec]
-                        (concat jvm-args
-                                ["-classpath" classpath
-                                 main-class]))
-          pb (ProcessBuilder. ^java.util.List command)]
-      (.directory pb (io/file bin-dir))
-      (.inheritIO pb)
+          bin-dir (str intellij-sdk "/bin")]
+      (cond-> {:version 1
+               :cwd bin-dir
+               :javaPath java-exec
+               :javaRequirements {:major (Integer/parseInt jvm-target)
+                                  :jbr true}
+               :mainClass main-class
+               :vmArgs jvm-args
+               :classpathEntries classpath-entries
+               :appArgs []}
+        debug-port (assoc :debugPort debug-port)))))
 
-      (println "Launching IDE...")
-      (let [ide-process (.start pb)
-            pid (.pid ide-process)]
-        (println "IDE PID:" pid)
-        (when debug-port
-          (println "Debug port:" debug-port))
-        (let [exit-code (.waitFor ide-process)]
-          (when-not (zero? exit-code)
-            (System/exit exit-code)))))))
+(defn ide-params
+  "Print IDE launch parameters as JSON.
+
+   Options from args:
+   - :sandbox-dir  Sandbox dir (default \"sandbox\")
+   - :debug        Optional flag to add JDWP debug JVM argument
+   - :debug-port   Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
+
+   Compiles all modules, prepares sandbox, then prints JSON launch parameters to stdout."
+  [args]
+  (let [params (binding [*out* *err*]
+                 (ide-launch-params args))]
+    (println (json/write-str params))))
+
+(defn run-ide
+  "Deprecated alias for ide-params. Use ide-params with scripts/run-ide."
+  [args]
+  (ide-params args))
 
 ;; =============================================================================
 ;; Test Execution

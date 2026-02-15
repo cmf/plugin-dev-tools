@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "Error: jq is required" >&2
+  exit 1
+fi
+
+if ! raw_output="$(clojure -T:build ide-params "$@")"; then
+  echo "Error: ide-params failed" >&2
+  exit 1
+fi
+
+params_json="$(awk '/^[[:space:]]*\{/{json=$0} END{print json}' <<<"$raw_output")"
+if [[ -z "$params_json" ]]; then
+  echo "Error: ide-params did not output JSON on stdout" >&2
+  if [[ -n "$raw_output" ]]; then
+    echo "Captured stdout:" >&2
+    echo "$raw_output" >&2
+  fi
+  exit 1
+fi
+
+if ! jq -e '
+  type == "object"
+  and (.version | type == "number")
+  and (.cwd | type == "string")
+  and (.mainClass | type == "string")
+  and (.vmArgs | type == "array")
+  and (.classpathEntries | type == "array")
+  and (.appArgs | type == "array")
+' >/dev/null <<<"$params_json"; then
+  echo "Error: ide-params JSON is invalid or missing required fields" >&2
+  echo "$params_json" >&2
+  exit 1
+fi
+
+java_path="$(jq -r '.javaPath // "java"' <<<"$params_json")"
+cwd="$(jq -r '.cwd' <<<"$params_json")"
+main_class="$(jq -r '.mainClass' <<<"$params_json")"
+required_major="$(jq -r '.javaRequirements.major // empty' <<<"$params_json")"
+require_jbr="$(jq -r '.javaRequirements.jbr // false' <<<"$params_json")"
+debug_port="$(jq -r '.debugPort // empty' <<<"$params_json")"
+
+mapfile -t vm_args < <(jq -r '.vmArgs[]?' <<<"$params_json")
+mapfile -t classpath_entries < <(jq -r '.classpathEntries[]?' <<<"$params_json")
+mapfile -t app_args < <(jq -r '.appArgs[]?' <<<"$params_json")
+
+if [[ ${#classpath_entries[@]} -eq 0 ]]; then
+  echo "Error: classpathEntries is empty" >&2
+  exit 1
+fi
+
+if [[ "$java_path" == */* ]]; then
+  if [[ ! -x "$java_path" ]]; then
+    echo "Error: Java executable not found or not executable: $java_path" >&2
+    exit 1
+  fi
+else
+  if ! command -v "$java_path" >/dev/null 2>&1; then
+    echo "Error: Java executable not found on PATH: $java_path" >&2
+    exit 1
+  fi
+fi
+
+java_props="$($java_path -XshowSettings:properties -version 2>&1)"
+detected_major="$(awk -F'= ' '/^[[:space:]]*java.specification.version =/{print $2; exit}' <<<"$java_props" | tr -d '[:space:]')"
+detected_vendor="$(awk -F'= ' '/^[[:space:]]*java.vendor =/{print $2; exit}' <<<"$java_props")"
+detected_runtime="$(awk -F'= ' '/^[[:space:]]*java.runtime.name =/{print $2; exit}' <<<"$java_props")"
+
+if [[ -n "$required_major" && "$detected_major" != "$required_major" ]]; then
+  echo "Error: Expected Java major $required_major, got $detected_major (java: $java_path, vendor: $detected_vendor, runtime: $detected_runtime)" >&2
+  exit 1
+fi
+
+if [[ "$require_jbr" == "true" ]]; then
+  if [[ "$detected_vendor" != *JetBrains* && "$detected_runtime" != *JetBrains* && "$java_props" != *JBR* ]]; then
+    echo "Error: Expected JetBrains Runtime (JBR), got vendor='$detected_vendor' runtime='$detected_runtime' (java: $java_path)" >&2
+    exit 1
+  fi
+fi
+
+classpath=""
+for entry in "${classpath_entries[@]}"; do
+  if [[ -z "$classpath" ]]; then
+    classpath="$entry"
+  else
+    classpath="$classpath:$entry"
+  fi
+done
+
+if [[ -n "$debug_port" ]]; then
+  echo "Debug port: $debug_port" >&2
+fi
+
+cd "$cwd"
+exec "$java_path" "${vm_args[@]}" -classpath "$classpath" "$main_class" "${app_args[@]}"
