@@ -42,9 +42,20 @@ required_major="$(jq -r '.javaRequirements.major // empty' <<<"$params_json")"
 require_jbr="$(jq -r '.javaRequirements.jbr // false' <<<"$params_json")"
 debug_port="$(jq -r '.debugPort // empty' <<<"$params_json")"
 
-mapfile -t vm_args < <(jq -r '.vmArgs[]?' <<<"$params_json")
-mapfile -t classpath_entries < <(jq -r '.classpathEntries[]?' <<<"$params_json")
-mapfile -t app_args < <(jq -r '.appArgs[]?' <<<"$params_json")
+vm_args=()
+while IFS= read -r line; do
+  vm_args+=("$line")
+done < <(jq -r '.vmArgs[]?' <<<"$params_json")
+
+classpath_entries=()
+while IFS= read -r line; do
+  classpath_entries+=("$line")
+done < <(jq -r '.classpathEntries[]?' <<<"$params_json")
+
+app_args=()
+while IFS= read -r line; do
+  app_args+=("$line")
+done < <(jq -r '.appArgs[]?' <<<"$params_json")
 
 if [[ ${#classpath_entries[@]} -eq 0 ]]; then
   echo "Error: classpathEntries is empty" >&2
@@ -94,4 +105,4 @@ if [[ -n "$debug_port" ]]; then
 fi
 
 cd "$cwd"
-exec "$java_path" "${vm_args[@]}" -classpath "$classpath" "$main_class" "${app_args[@]}"
+exec "$java_path" "${vm_args[@]+${vm_args[@]}}" -classpath "$classpath" "$main_class" "${app_args[@]+${app_args[@]}}"

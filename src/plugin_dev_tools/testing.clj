@@ -104,16 +104,22 @@
 ;; Sandbox Setup
 ;; =============================================================================
 
+(defn ensure-sandbox!
+  "Ensure sandbox directory structure exists without deleting existing state."
+  [sandbox-dir]
+  (println "Ensuring sandbox directory structure...")
+  (doseq [subdir ["config" "system" "plugins" "system/log"]]
+    (fs/create-dirs (fs/path sandbox-dir subdir)))
+  (println "Sandbox directory ready")
+  true)
+
 (defn setup-sandbox!
   "Set up sandbox directory structure for test execution"
   [sandbox-dir]
   (println "Setting up sandbox directory...")
   (when (fs/exists? sandbox-dir)
     (fs/delete-tree sandbox-dir))
-  (doseq [subdir ["config" "system" "plugins" "system/log"]]
-    (fs/create-dirs (fs/path sandbox-dir subdir)))
-  (println "Sandbox directory ready")
-  true)
+  (ensure-sandbox! sandbox-dir))
 
 ;; =============================================================================
 ;; Classpath Building

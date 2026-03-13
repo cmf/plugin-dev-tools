@@ -164,6 +164,13 @@
     (doseq [path dirs]
       (api/delete {:path path}))))
 
+(defn clean-sandbox
+  "Delete the entire sandbox root so the next launch starts from scratch.
+  Options:
+    :sandbox-dir   Base sandbox directory (default \"sandbox\")"
+  [{:keys [sandbox-dir] :or {sandbox-dir "sandbox"}}]
+  (api/delete {:path sandbox-dir}))
+
 (defn classpath-files
   "Return the files (non-directories) from a tools.build basis."
   [basis]
@@ -930,7 +937,7 @@
     (println "Compiling modules...")
     (run! compile-module modules)
 
-    (testing/setup-sandbox! sandbox-dir)
+    (testing/ensure-sandbox! sandbox-dir)
     (prepare-sandbox {:sandbox-dir sandbox-dir})
 
     (println "Using IntelliJ SDK:" intellij-sdk)

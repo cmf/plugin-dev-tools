@@ -46,8 +46,11 @@ library (`plugin-dev-tools.build`).
   will build processor modules as needed and invoke KSP before Kotlin compilation.
 - `package` compiles, syncs kotlinc config, builds jars (merging as configured), prepares the
   sandbox, and zips to `build/distributions/<plugin>-<version>.zip`.
-- Utilities for running `kotlinc`, `javac`, `ksp-run`, `prepare-sandbox`, `plugin.xml`
-  updates, and `verify-plugin` are available if you need custom flows.
+- Utilities for running `kotlinc`, `javac`, `ksp-run`, `prepare-sandbox`, `clean-sandbox`,
+  `ide-params`, `plugin.xml` updates, and `verify-plugin` are available if you need custom flows.
+- `ide-params`/`scripts/run-ide` preserve existing sandbox `config/` and `system/` state across
+  launches, while still rebuilding `sandbox/plugins/`. Use `clean-sandbox` when you want a fresh
+  sandbox from scratch.
 
 ## Notes
 - This repo is meant for Kotlin/Java IntelliJ plugins; it does not help write
