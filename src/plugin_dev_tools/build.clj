@@ -24,7 +24,7 @@
 
 (def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
 
-(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-Xjvm-default=all" "-language-version" "2.2"])
+(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-jvm-default=no-compatibility" "-language-version" "2.2"])
 
 ;; Config functions
 
