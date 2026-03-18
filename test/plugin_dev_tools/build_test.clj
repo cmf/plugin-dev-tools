@@ -153,3 +153,41 @@
       (finally
         (fs/delete-tree sdk-dir)
         (fs/delete-tree sandbox-dir)))))
+
+(defn- updated-plugin-xml
+  [{:keys [idea-version platform-version]}]
+  (let [base-dir (fs/create-temp-dir {:prefix "plugin-xml-"})
+        target (fs/path base-dir "out")
+        plugin-xml (fs/path target "META-INF" "plugin.xml")
+        description (fs/path base-dir "description.html")]
+    (try
+      (fs/create-dirs (fs/parent plugin-xml))
+      (spit (str plugin-xml)
+            (str "<idea-plugin>\n"
+                 "  <version>0.0.0</version>\n"
+                 "  <idea-version since-build=\"251.0\" until-build=\"251.*\"/>\n"
+                 "  <description>old</description>\n"
+                 "</idea-plugin>\n"))
+      (spit (str description) "<p>Hello</p>\n")
+      (with-redefs [build/jj-revision (fn [_] "abc123")]
+        (build/update-plugin-xml {:target           (str target)
+                                  :plugin-version   "1.2.3"
+                                  :base-dir         (str base-dir)
+                                  :description-path "description.html"
+                                  :plugin-xml-path  (str plugin-xml)
+                                  :idea-version     idea-version
+                                  :platform-version platform-version}))
+      (slurp (str plugin-xml))
+      (finally
+        (fs/delete-tree base-dir)))))
+
+(deftest test-update-plugin-xml-replaces-idea-version-for-2025-3-and-newer
+  (let [xml (updated-plugin-xml {:idea-version "2025.3-eap"})]
+    (is (re-find #"<idea-version since-build=\"253\.0\" until-build=\"253\.\*\" strict-until-build=\"253\.\*\"/>"
+                 xml))))
+
+(deftest test-update-plugin-xml-omits-strict-until-build-before-2025-3
+  (let [xml (updated-plugin-xml {:platform-version "252"})]
+    (is (re-find #"<idea-version since-build=\"252\.0\" until-build=\"252\.\*\"/>"
+                 xml))
+    (is (not (re-find #"strict-until-build" xml)))))

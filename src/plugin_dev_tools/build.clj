@@ -283,6 +283,33 @@
        :out
        str/trim)))
 
+(defn- idea-build-major
+  [{:keys [platform-version idea-version]}]
+  (let [candidates (->> [platform-version idea-version]
+                        (map #(some-> % str str/trim))
+                        (remove str/blank?))]
+    (or (some (fn [version]
+                (some->> (re-matches #"^(\d{3})(?:\..*)?$" version)
+                         second))
+              candidates)
+        (some (fn [version]
+                (when-let [[_ year minor] (re-matches #"^(\d{4})\.(\d+)(?:[.-].*)?$" version)]
+                  (str "2" (mod (parse-long year) 10) minor)))
+              candidates)
+        (throw (ex-info "Could not derive IntelliJ build major version"
+                        {:platform-version platform-version
+                         :idea-version     idea-version})))))
+
+(defn- idea-version-tag
+  [args]
+  (let [build-major (idea-build-major args)
+        until-build (str build-major ".*")]
+    (str "<idea-version since-build=\"" build-major ".0\""
+         " until-build=\"" until-build "\""
+         (when (>= (parse-long build-major) 253)
+           (str " strict-until-build=\"" until-build "\""))
+         "/>")))
+
 (defn update-plugin-xml
   "Update plugin.xml with version, description, build metadata and optional resource copy.
   Options:
@@ -292,8 +319,11 @@
     :description-path  Path to description.html (default \"description.html\")
     :plugin-xml-path   Override plugin.xml path (defaults to <target>/META-INF/plugin.xml)
     :copy-resources?   Copy resource dirs into target before writing plugin.xml
-    :resource-dirs     Seq of resource dirs (relative or absolute) to copy when copy-resources? is true."
+    :resource-dirs     Seq of resource dirs (relative or absolute) to copy when copy-resources? is true.
+    :idea-version      IntelliJ version string used to derive the idea-version tag
+    :platform-version  IntelliJ build major or branch used to derive the idea-version tag."
   [{:keys [target plugin-version base-dir description-path plugin-xml-path copy-resources? resource-dirs]
+    :as   args
     :or   {base-dir "." description-path "description.html"}}]
   (when copy-resources?
     (doseq [dir resource-dirs]
@@ -308,6 +338,9 @@
                 slurp
                 (str/replace #"(<version>).*(</version>)"
                              (str "$1" plugin-version "$2"))
+                (str/replace #"(?m)^(\s*)<idea-version\b[^>]*/>"
+                             (fn [[_ indent]]
+                               (str indent (idea-version-tag args))))
                 (str/replace #"(?s)(<description>[\r\n\s]*).*([\r\n\s]*</description>)"
                              (str "$1<![CDATA[\n"
                                   description
@@ -666,7 +699,9 @@
                             :base-dir         "."
                             :description-path "description.html"
                             :copy-resources?  true
-                            :resource-dirs    resource-paths})))
+                            :resource-dirs    resource-paths
+                            :idea-version     (:idea-version config)
+                            :platform-version (:platform-version config)})))
     (api/jar {:class-dir target
               :jar-file  jar-file})))
 
