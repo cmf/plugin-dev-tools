@@ -24,7 +24,32 @@
 
 (def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
 
-(def kotlinc-opts ["-jvm-target" jvm-target "-no-stdlib" "-jvm-default=no-compatibility" "-language-version" "2.2"])
+(defn- kotlin-at-least?
+  [version major minor]
+  (let [[v-major v-minor] (let [parts (->> (or version "")
+                                           (re-seq #"\d+")
+                                           (take 2)
+                                           (mapv #(Integer/parseInt %)))]
+                            [(or (nth parts 0 nil) 0)
+                             (or (nth parts 1 nil) 0)])]
+    (or (> v-major major)
+        (and (= v-major major)
+             (>= v-minor minor)))))
+
+(defn- kotlinc-jvm-default-opt
+  [kotlin-version]
+  (if (kotlin-at-least? kotlin-version 2 2)
+    "-jvm-default=no-compatibility"
+    "-Xjvm-default=all"))
+
+(defn default-kotlinc-opts
+  [kotlin-version]
+  ["-jvm-target" jvm-target
+   "-no-stdlib"
+   (kotlinc-jvm-default-opt kotlin-version)
+   "-language-version" "2.2"])
+
+(def kotlinc-opts (default-kotlinc-opts "2.2.0"))
 
 ;; Config functions
 
@@ -96,6 +121,7 @@
   "Returns elaborated module info from plugin.edn in dependency order."
   [args]
   (let [config (edn/read-string (slurp "plugin.edn"))
+        kotlin-version (:kotlin-version config)
         modules (reduce-kv (fn [ret id details]
                              (let [module-path (or (:module-path details) id)
                                    module (if (= module-path ".")
@@ -126,7 +152,8 @@
                                                                 :plugin-directory plugin-directory
                                                                 :include-in-sandbox? include-in-sandbox?
                                                                 :merge-into-main? merge-into-main?
-                                                                :intellij-tests? intellij-tests?))))
+                                                                :intellij-tests? intellij-tests?
+                                                                :kotlin-version kotlin-version))))
                            (sorted-map)
                            (:modules config))
         deps-map (reduce (fn [ret {:keys [module depends ksp ksp-test]}]
@@ -537,7 +564,7 @@
   ([module-config]
    (compile-module module-config false))
   ([{:keys [module module-path description depends
-            javac-opts kotlinc-opts serialization? extra-aliases]
+            javac-opts kotlinc-opts serialization? extra-aliases kotlin-version]
      :as   module-config}
     test?]
    (let [target (str "out/" (if test? "test" "production") "/" module)
@@ -559,7 +586,8 @@
                            dep-prod-dirs)
          production-dirs prod-dirs
          javac-opts (or javac-opts plugin-dev-tools.build/javac-opts)
-         kotlinc-opts (let [opts (conj (vec (or kotlinc-opts plugin-dev-tools.build/kotlinc-opts)) "-module-name" module)
+         kotlinc-opts (let [base-opts (or kotlinc-opts (default-kotlinc-opts kotlin-version))
+                            opts (conj (vec base-opts) "-module-name" module)
                             opts (if serialization?
                                    (let [serialization-plugin-path (-> (binding [api/*project-root* module-path]
                                                                          (api/create-basis {:aliases (into [:no-clojure :plugins])}))

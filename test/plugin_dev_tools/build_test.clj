@@ -28,6 +28,20 @@
                       :clean @clean-calls}))
     @result))
 
+(deftest test-kotlinc-jvm-default-opt-uses-legacy-flag-before-kotlin-2-2
+  (is (= "-Xjvm-default=all"
+         (#'build/kotlinc-jvm-default-opt "2.1.21")))
+  (is (= "-Xjvm-default=all"
+         (#'build/kotlinc-jvm-default-opt "1.9.25"))))
+
+(deftest test-kotlinc-jvm-default-opt-uses-no-compatibility-on-kotlin-2-2-and-newer
+  (is (= "-jvm-default=no-compatibility"
+         (#'build/kotlinc-jvm-default-opt "2.2.0")))
+  (is (= "-jvm-default=no-compatibility"
+         (#'build/kotlinc-jvm-default-opt "2.2.10")))
+  (is (= "-jvm-default=no-compatibility"
+         (#'build/kotlinc-jvm-default-opt "2.3.0-Beta1"))))
+
 (deftest test-package-compiles-by-default
   (let [{:keys [compile clean]} (run-package {})]
     (is (= 1 clean))
