@@ -563,6 +563,10 @@
   (when-let [product-info (read-product-info sdk-dir)]
     (version>=? (:version product-info) test-framework-min-version)))
 
+(defn- test-framework-deps-version [sdk-dir version]
+  (or (:buildNumber (read-product-info sdk-dir))
+      version))
+
 (defn- write-test-framework-deps! [sdk-dir version coord exclusions]
   (let [target (fs/file sdk-dir (name coord))
         deps {:paths []
@@ -578,9 +582,10 @@
   [sdk-dir version]
   (let [sdk-dir (fs/file sdk-dir)]
     (when (supports-test-framework-deps? sdk-dir)
-      (let [exclusions (test-framework-exclusions sdk-dir)]
+      (let [exclusions (test-framework-exclusions sdk-dir)
+            test-framework-version (test-framework-deps-version sdk-dir version)]
         (doseq [coord test-framework-coordinates]
-          (write-test-framework-deps! sdk-dir version coord exclusions)))
+          (write-test-framework-deps! sdk-dir test-framework-version coord exclusions)))
       true)))
 
 (defn- update-test-framework-exclusions

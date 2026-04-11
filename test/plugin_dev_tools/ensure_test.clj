@@ -101,12 +101,13 @@
     (create-sample-sdk! sdk-dir)
     (spit (fs/file sdk-dir "product-info.json")
           (json/write-str {:version "2026.1"
+                           :buildNumber "261.17801.55-EAP-SNAPSHOT"
                            :launch [{:os (testing/detect-os)
                                      :bootClassPathJarNames ["intellij.platform.ide.impl.jar"
                                                              "lib.jar"]}]
                            :layout [{:name "com.intellij"
                                      :classPath ["lib/intellij.platform.ide.impl.jar"]}]}))
-    (ensure/maybe-write-test-framework-deps! sdk-dir "261.17801.55-EAP-SNAPSHOT")
+    (ensure/maybe-write-test-framework-deps! sdk-dir "2026.1")
     (let [frameworks {"test-framework" 'com.jetbrains.intellij.platform/test-framework
                       "test-framework-junit5" 'com.jetbrains.intellij.platform/test-framework-junit5
                       "java-test-framework" 'com.jetbrains.intellij.java/java-test-framework}
