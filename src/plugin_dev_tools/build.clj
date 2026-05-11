@@ -20,9 +20,15 @@
 
 (declare build-module get-plugin-id)
 
-(def jvm-target "21")
+(def default-jvm-target "21")
 
-(def javac-opts ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
+(def jvm-target default-jvm-target)
+
+(defn default-javac-opts
+  [jvm-target]
+  ["--release" jvm-target "-Xlint:deprecation" "-proc:none"])
+
+(def javac-opts (default-javac-opts jvm-target))
 
 (defn- kotlin-at-least?
   [version major minor]
@@ -43,11 +49,13 @@
     "-Xjvm-default=all"))
 
 (defn default-kotlinc-opts
-  [kotlin-version]
-  ["-jvm-target" jvm-target
-   "-no-stdlib"
-   (kotlinc-jvm-default-opt kotlin-version)
-   "-language-version" "2.2"])
+  ([kotlin-version]
+   (default-kotlinc-opts kotlin-version jvm-target))
+  ([kotlin-version jvm-target]
+   ["-jvm-target" jvm-target
+    "-no-stdlib"
+    (kotlinc-jvm-default-opt kotlin-version)
+    "-language-version" "2.2"]))
 
 (def kotlinc-opts (default-kotlinc-opts "2.2.0"))
 
@@ -117,11 +125,38 @@
     file
     (str module-path "/" file)))
 
+(defn- intellij-sdk-path
+  []
+  (try
+    (get-in (edn/read-string (slurp "deps.edn"))
+            [:aliases :sdk :extra-deps 'intellij/sdk :local/root])
+    (catch Exception _
+      nil)))
+
+(defn- product-info
+  [intellij-sdk]
+  (try
+    (let [file (io/file intellij-sdk "product-info.json")]
+      (when (.exists file)
+        (json/read-str (slurp file) :key-fn keyword)))
+    (catch Exception _
+      nil)))
+
+(defn- product-info-jvm-target
+  [product-info]
+  (some-> (:minRequiredJavaVersion product-info) str))
+
+(defn- project-jvm-target
+  []
+  (or (some-> (intellij-sdk-path) product-info product-info-jvm-target)
+      jvm-target))
+
 (defn module-info
   "Returns elaborated module info from plugin.edn in dependency order."
   [args]
   (let [config (edn/read-string (slurp "plugin.edn"))
         kotlin-version (:kotlin-version config)
+        jvm-target (project-jvm-target)
         modules (reduce-kv (fn [ret id details]
                              (let [module-path (or (:module-path details) id)
                                    module (if (= module-path ".")
@@ -153,7 +188,8 @@
                                                                 :include-in-sandbox? include-in-sandbox?
                                                                 :merge-into-main? merge-into-main?
                                                                 :intellij-tests? intellij-tests?
-                                                                :kotlin-version kotlin-version))))
+                                                                :kotlin-version kotlin-version
+                                                                :jvm-target jvm-target))))
                            (sorted-map)
                            (:modules config))
         deps-map (reduce (fn [ret {:keys [module depends ksp ksp-test]}]
@@ -447,7 +483,7 @@
            jvm-target language-version api-version module-name processor-jar target-packages
            target-packages-prop allow-unsafe? extra-jvm-opts ksp-main]
     :or   {project-root   "." cache-dir nil ksp-aliases [:no-clojure :ksp-plugin] sdk-aliases [:no-clojure :sdk]
-           jvm-target     "21" language-version "2.0" api-version "2.0" module-name "main" allow-unsafe? false
+           jvm-target     default-jvm-target language-version "2.0" api-version "2.0" module-name "main" allow-unsafe? false
            extra-jvm-opts [] ksp-main "com.google.devtools.ksp.cmdline.KSPJvmMain"}}]
   (when-not processor-jar
     (throw (ex-info "KSP processor jar is required" {})))
@@ -537,7 +573,8 @@
                   :sdk-aliases          (:sdk-aliases ksp)
                   :allow-unsafe?        (:allow-unsafe? ksp)
                   :extra-jvm-opts       (:extra-jvm-opts ksp)
-                  :module-name          (or (:module-name ksp) module)}
+                  :module-name          (or (:module-name ksp) module)
+                  :jvm-target           (:jvm-target module-config)}
                  (select-keys ksp [:jvm-target :language-version :api-version])))))))
 
 (defn- ensure-processor-jar
@@ -564,7 +601,7 @@
   ([module-config]
    (compile-module module-config false))
   ([{:keys [module module-path description depends
-            javac-opts kotlinc-opts serialization? extra-aliases kotlin-version]
+            javac-opts kotlinc-opts serialization? extra-aliases kotlin-version jvm-target]
      :as   module-config}
     test?]
    (let [target (str "out/" (if test? "test" "production") "/" module)
@@ -585,8 +622,9 @@
                            (into [self-prod] dep-prod-dirs)
                            dep-prod-dirs)
          production-dirs prod-dirs
-         javac-opts (or javac-opts plugin-dev-tools.build/javac-opts)
-         kotlinc-opts (let [base-opts (or kotlinc-opts (default-kotlinc-opts kotlin-version))
+         jvm-target (or jvm-target default-jvm-target)
+         javac-opts (or javac-opts (default-javac-opts jvm-target))
+         kotlinc-opts (let [base-opts (or kotlinc-opts (default-kotlinc-opts kotlin-version jvm-target))
                             opts (conj (vec base-opts) "-module-name" module)
                             opts (if serialization?
                                    (let [serialization-plugin-path (-> (binding [api/*project-root* module-path]
@@ -995,7 +1033,10 @@
         debug-port (try
                      (resolve-debug-port args)
                      (catch Exception e
-                       (fail! (.getMessage e))))]
+                       (fail! (.getMessage e))))
+        launch-jvm-target (or (product-info-jvm-target product-info)
+                              (some :jvm-target modules)
+                              default-jvm-target)]
 
     (println "Compiling modules...")
     (run! compile-module modules)
@@ -1018,7 +1059,7 @@
       (cond-> {:version 1
                :cwd bin-dir
                :javaPath java-exec
-               :javaRequirements {:major (Integer/parseInt jvm-target)
+               :javaRequirements {:major (Integer/parseInt launch-jvm-target)
                                   :jbr true}
                :mainClass main-class
                :vmArgs jvm-args

@@ -42,6 +42,31 @@
   (is (= "-jvm-default=no-compatibility"
          (#'build/kotlinc-jvm-default-opt "2.3.0-Beta1"))))
 
+(deftest test-module-info-uses-sdk-min-required-java-version-as-jvm-target
+  (let [sdk-dir (fs/create-temp-dir {:prefix "sdk-"})
+        product-info (fs/path sdk-dir "product-info.json")
+        slurp* clojure.core/slurp]
+    (try
+      (spit (str product-info) (json/write-str {:minRequiredJavaVersion 25}))
+      (with-redefs [clojure.core/slurp (fn [path]
+                                         (case (str path)
+                                           "plugin.edn" "{:kotlin-version \"2.3.10\" :modules {\"main\" {:description \"Main\"}}}"
+                                           "deps.edn" (pr-str {:aliases {:sdk {:extra-deps {'intellij/sdk {:local/root (str sdk-dir)}}}}})
+                                           (slurp* path)))]
+        (is (= "25" (:jvm-target (first (build/module-info {}))))))
+      (finally
+        (fs/delete-tree sdk-dir)))))
+
+(deftest test-ksp-options-use-module-jvm-target
+  (let [opts (#'build/module-ksp-options {:module "main"
+                                          :module-path "."
+                                          :jvm-target "25"
+                                          :ksp {:processor-module "processor"}
+                                          :all-modules {"processor" {:module-path "processor"
+                                                                     :jar-file "processor/build/distributions/processor.jar"}}}
+                                         false)]
+    (is (= "25" (:jvm-target opts)))))
+
 (deftest test-package-compiles-by-default
   (let [{:keys [compile clean]} (run-package {})]
     (is (= 1 clean))
@@ -105,7 +130,7 @@
                                    build/prepare-sandbox (fn [args] (reset! prepared args))
                                    plugin-dev-tools.testing/find-intellij-sdk (fn [] (str sdk-dir))
                                    build/get-plugin-id (fn [] "com.example.plugin")
-                                   plugin-dev-tools.testing/read-product-info (fn [_] {:launch []})
+                                   plugin-dev-tools.testing/read-product-info (fn [_] {:minRequiredJavaVersion 25 :launch []})
                                    plugin-dev-tools.testing/detect-os (fn [] "Linux")
                                    plugin-dev-tools.testing/detect-architecture (fn [] "amd64")
                                    plugin-dev-tools.testing/find-launch-config (fn [& _]
@@ -123,7 +148,7 @@
         (is (= 1 (:version params)))
         (is (= (str sdk-dir "/bin") (:cwd params)))
         (is (= "/java/bin/java" (:javaPath params)))
-        (is (= {:major 21 :jbr true} (:javaRequirements params)))
+        (is (= {:major 25 :jbr true} (:javaRequirements params)))
         (is (= "com.intellij.idea.Main" (:mainClass params)))
         (is (= [(str a-jar) (str b-jar)] (:classpathEntries params)))
         (is (= [] (:appArgs params)))

@@ -74,6 +74,19 @@
       (is (contains? exclusions 'junit/junit))
       (is (not (contains? exclusions 'com.jetbrains.intellij.platform/not-present))))))
 
+(deftest test-test-framework-exclusions-drop-unreadable-symbols
+  (with-temp-dir [sdk-dir]
+    (fs/create-dirs (fs/file sdk-dir "lib"))
+    (spit (fs/file sdk-dir "lib" "lib.jar") "")
+    (write-product-info! sdk-dir)
+    (write-jar! (fs/file sdk-dir "modules" "module-descriptors.jar")
+                {"jruby-parser-0.5.4.xml"
+                 (module-xml "jruby-parser-0.5.4" "../lib/lib.jar")})
+    (let [exclusions (ensure/test-framework-exclusions sdk-dir)]
+      (is (not (contains? (set exclusions)
+                          (symbol "com.jetbrains.jruby-parser-0.5/5-4"))))
+      (is (edn/read-string (pr-str exclusions))))))
+
 (deftest test-test-framework-exclusions-fallback
   (with-temp-dir [sdk-dir]
     (write-product-info! sdk-dir)

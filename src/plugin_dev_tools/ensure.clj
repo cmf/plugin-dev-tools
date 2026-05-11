@@ -506,6 +506,14 @@
                 #{}
                 (enumeration-seq (.entries jar-file)))))))
 
+(defn- readable-pr-str?
+  [value]
+  (try
+    (edn/read-string (pr-str value))
+    true
+    (catch Exception _
+      false)))
+
 (defn test-framework-exclusions
   "Return exclusions for the IntelliJ test framework dependency based on SDK contents."
   [sdk-dir]
@@ -515,6 +523,7 @@
                      (set/union module-exclusions explicit-exclusions)
                      (set/union fallback-exclusions explicit-exclusions))]
     (->> exclusions
+         (filter readable-pr-str?)
          (sort-by str)
          vec)))
 
