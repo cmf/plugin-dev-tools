@@ -1014,6 +1014,25 @@
   [path]
   (some-> path fs/absolutize str))
 
+(defn- app-arg-vector
+  [app-args]
+  (cond
+    (nil? app-args) []
+    (sequential? app-args) (mapv str app-args)
+    :else [(str app-args)]))
+
+(defn- ide-app-args
+  [args]
+  (cond-> []
+    (:dont-reopen-projects? args)
+    (conj "dontReopenProjects")
+
+    (:project-path args)
+    (conj (absolute-path (:project-path args)))
+
+    (:app-args args)
+    (into (app-arg-vector (:app-args args)))))
+
 (defn- ide-launch-params
   [args]
   (let [modules (module-info args)
@@ -1064,16 +1083,19 @@
                :mainClass main-class
                :vmArgs jvm-args
                :classpathEntries classpath-entries
-               :appArgs []}
+               :appArgs (ide-app-args args)}
         debug-port (assoc :debugPort debug-port)))))
 
 (defn ide-params
   "Print IDE launch parameters as JSON.
 
    Options from args:
-   - :sandbox-dir  Sandbox dir (default \"sandbox\")
-   - :debug        Optional flag to add JDWP debug JVM argument
-   - :debug-port   Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
+   - :sandbox-dir              Sandbox dir (default \"sandbox\")
+   - :project-path             Optional project/file path to open on startup
+   - :dont-reopen-projects?    Optional flag to pass dontReopenProjects launcher arg
+   - :app-args                 Optional extra launcher args appended after :project-path
+   - :debug                    Optional flag to add JDWP debug JVM argument
+   - :debug-port               Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
 
    Compiles all modules, prepares sandbox, then prints JSON launch parameters to stdout."
   [args]

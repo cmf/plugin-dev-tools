@@ -160,6 +160,41 @@
         (fs/delete-tree sdk-dir)
         (fs/delete-tree sandbox-dir)))))
 
+(deftest test-ide-params-includes-project-path-and-launcher-args
+  (let [sdk-dir (fs/create-temp-dir {:prefix "sdk-"})
+        sandbox-dir (fs/create-temp-dir {:prefix "sandbox-"})
+        project-dir (fs/create-temp-dir {:prefix "manual-test-project-"})
+        a-jar (fs/path sdk-dir "lib" "a.jar")]
+    (try
+      (fs/create-dirs (fs/parent a-jar))
+      (spit (str a-jar) "")
+      (let [stdout (with-out-str
+                     (with-redefs [build/module-info (fn [_] [{:module "main"}])
+                                   build/compile-module (fn [_] nil)
+                                   build/prepare-sandbox (fn [_] nil)
+                                   plugin-dev-tools.testing/find-intellij-sdk (fn [] (str sdk-dir))
+                                   build/get-plugin-id (fn [] "com.example.plugin")
+                                   plugin-dev-tools.testing/read-product-info (fn [_] {:launch []})
+                                   plugin-dev-tools.testing/detect-os (fn [] "Linux")
+                                   plugin-dev-tools.testing/detect-architecture (fn [] "amd64")
+                                   plugin-dev-tools.testing/find-launch-config (fn [& _]
+                                                                                 {:mainClass "com.intellij.idea.Main"
+                                                                                  :bootClassPathJarNames ["a.jar"]
+                                                                                  :additionalJvmArguments []})
+                                   plugin-dev-tools.testing/find-java-exec (fn [_] "/java/bin/java")
+                                   plugin-dev-tools.testing/load-vm-options (fn [_] [])]
+                       (build/ide-params {:sandbox-dir (str sandbox-dir)
+                                          :dont-reopen-projects? true
+                                          :project-path (str project-dir)
+                                          :app-args ["--line" "12"]})))
+            params (json/read-str stdout :key-fn keyword)]
+        (is (= ["dontReopenProjects" (str (fs/absolutize project-dir)) "--line" "12"]
+               (:appArgs params))))
+      (finally
+        (fs/delete-tree sdk-dir)
+        (fs/delete-tree sandbox-dir)
+        (fs/delete-tree project-dir)))))
+
 (deftest test-ide-params-includes-debug-port-when-enabled
   (let [sdk-dir (fs/create-temp-dir {:prefix "sdk-"})
         sandbox-dir (fs/create-temp-dir {:prefix "sandbox-"})
