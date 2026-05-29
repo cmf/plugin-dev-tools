@@ -155,6 +155,7 @@
         (is (some #(= "-Xmx2g" %) (:vmArgs params)))
         (is (some #(= (str "-Dfoo=" sdk-dir) %) (:vmArgs params)))
         (is (some #(= "-Dsun.awt.disablegrab=true" %) (:vmArgs params)))
+        (is (some #(= "-Dide.experimental.ui.onboarding=false" %) (:vmArgs params)))
         (is (some #(= (str "-Didea.config.path=" expected-sandbox "/config") %) (:vmArgs params))))
       (finally
         (fs/delete-tree sdk-dir)

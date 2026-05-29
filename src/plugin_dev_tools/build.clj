@@ -967,6 +967,7 @@
                    "-Didea.plugin.in.sandbox.mode=true"
                    "-Didea.vendor.name=JetBrains"
                    "-Dide.no.platform.update=false"
+                   "-Dide.experimental.ui.onboarding=false"
                    "-Djdk.module.illegalAccess.silent=true"
                    (str "-Didea.config.path=" sandbox-dir "/config")
                    (str "-Didea.plugins.path=" sandbox-dir "/plugins")
