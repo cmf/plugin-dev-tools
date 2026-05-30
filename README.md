@@ -51,7 +51,9 @@ library (`plugin-dev-tools.build`).
 - `ide-params`/`scripts/run-ide` preserve existing sandbox `config/` and `system/` state across
   launches, while still rebuilding `sandbox/plugins/`. Use `clean-sandbox` when you want a fresh
   sandbox from scratch. Pass `:project-path '"../manual-test-project"'` to open a project at
-  startup, and `:dont-reopen-projects? true` to suppress reopening previous projects.
+  startup; when `:sandbox-dir` is omitted, this uses `<project>/.sandbox` so each manual test
+  project gets its own IDE config/system paths. `:project-path` also passes `dontReopenProjects`
+  by default; use `:dont-reopen-projects? false` to keep previous project reopening behavior.
 
 ## Notes
 - This repo is meant for Kotlin/Java IntelliJ plugins; it does not help write

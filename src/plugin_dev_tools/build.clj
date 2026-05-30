@@ -1015,6 +1015,21 @@
   [path]
   (some-> path fs/absolutize str))
 
+(defn- project-sandbox-dir
+  [project-path]
+  (when project-path
+    (let [project-path (fs/absolutize project-path)
+          project-dir (if (.isFile (io/file (str project-path)))
+                        (fs/parent project-path)
+                        project-path)]
+      (str (fs/path project-dir ".sandbox")))))
+
+(defn- resolve-sandbox-dir
+  [args]
+  (absolute-path (or (:sandbox-dir args)
+                     (project-sandbox-dir (:project-path args))
+                     "sandbox")))
+
 (defn- app-arg-vector
   [app-args]
   (cond
@@ -1022,10 +1037,16 @@
     (sequential? app-args) (mapv str app-args)
     :else [(str app-args)]))
 
+(defn- dont-reopen-projects?
+  [args]
+  (if (contains? args :dont-reopen-projects?)
+    (:dont-reopen-projects? args)
+    (boolean (:project-path args))))
+
 (defn- ide-app-args
   [args]
   (cond-> []
-    (:dont-reopen-projects? args)
+    (dont-reopen-projects? args)
     (conj "dontReopenProjects")
 
     (:project-path args)
@@ -1037,7 +1058,7 @@
 (defn- ide-launch-params
   [args]
   (let [modules (module-info args)
-        sandbox-dir (absolute-path (or (:sandbox-dir args) "sandbox"))
+        sandbox-dir (resolve-sandbox-dir args)
         intellij-sdk (some-> (testing/find-intellij-sdk) absolute-path)
         _ (when-not intellij-sdk
             (fail! "Could not find IntelliJ SDK path in deps.edn"))
@@ -1092,8 +1113,8 @@
 
    Options from args:
    - :sandbox-dir              Sandbox dir (default \"sandbox\")
-   - :project-path             Optional project/file path to open on startup
-   - :dont-reopen-projects?    Optional flag to pass dontReopenProjects launcher arg
+   - :project-path             Optional project/file path to open on startup; defaults sandbox to <project>/.sandbox
+   - :dont-reopen-projects?    Optional flag to pass dontReopenProjects launcher arg (defaults true when :project-path is set)
    - :app-args                 Optional extra launcher args appended after :project-path
    - :debug                    Optional flag to add JDWP debug JVM argument
    - :debug-port               Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
