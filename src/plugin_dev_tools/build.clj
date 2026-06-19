@@ -469,6 +469,7 @@
     :aliases        Extra aliases appended to :ksp-aliases and :sdk-aliases
     :ksp-aliases    Aliases for KSP tool classpath (default [:no-clojure :ksp-plugin])
     :sdk-aliases    Aliases for libs classpath (default [:no-clojure :sdk])
+    :extra-libraries Additional library classpath entries appended to :sdk-aliases deps
     :jvm-target     JVM target (default \"21\")
     :language-version Kotlin language version (default \"2.0\")
     :api-version    Kotlin api version (default \"2.0\")
@@ -479,7 +480,7 @@
     :allow-unsafe?  Add --sun-misc-unsafe-memory-access=allow (default false)
     :extra-jvm-opts Extra JVM options (vector) passed before main class
     :ksp-main       KSP main class (default \"com.google.devtools.ksp.cmdline.KSPJvmMain\")."
-  [{:keys [project-root output-dir cache-dir src-dirs aliases ksp-aliases sdk-aliases
+  [{:keys [project-root output-dir cache-dir src-dirs aliases ksp-aliases sdk-aliases extra-libraries
            jvm-target language-version api-version module-name processor-jar target-packages
            target-packages-prop allow-unsafe? extra-jvm-opts ksp-main]
     :or   {project-root   "." cache-dir nil ksp-aliases [:no-clojure :ksp-plugin] sdk-aliases [:no-clojure :sdk]
@@ -491,11 +492,12 @@
         ksp-aliases (or ksp-aliases [:no-clojure :ksp-plugin])
         sdk-aliases (or sdk-aliases [:no-clojure :sdk])
         extra-jvm-opts (or extra-jvm-opts [])
+        extra-libraries (or extra-libraries [])
         ksp-basis (binding [api/*project-root* project-root]
                     (api/create-basis {:aliases (into ksp-aliases aliases)}))
         ksp-cp (mapcat :paths (vals (:libs ksp-basis)))
         libs-basis (api/create-basis {:aliases (into sdk-aliases aliases)})
-        libs (mapcat :paths (vals (:libs libs-basis)))
+        libs (concat (mapcat :paths (vals (:libs libs-basis))) extra-libraries)
         paths (map #(absolutize project-root %)
                    (or (seq src-dirs) (basis-source-roots libs-basis project-root)))
         cp (str/join File/pathSeparator ksp-cp)
@@ -545,6 +547,25 @@
                                       processor-jar]))]
         (process/process {:command-args cmdline})))))
 
+(defn- generated-source-root?
+  [path]
+  (let [path (str/replace (str path) #"\\\\" "/")]
+    (or (str/ends-with? path "/generated")
+        (= path "generated")
+        (str/includes? path "/generated/"))))
+
+(defn- test-ksp-source-dirs
+  [{:keys [kotlin-test-paths java-test-paths]} ksp]
+  (or (:src-dirs ksp)
+      (vec (distinct (remove generated-source-root?
+                             (concat kotlin-test-paths java-test-paths))))))
+
+(defn- test-ksp-extra-libraries
+  [{:keys [module depends]} ksp]
+  (vec (distinct (concat [(str "out/production/" module)]
+                         (map #(str "out/production/" %) depends)
+                         (:extra-libraries ksp)))))
+
 (defn- module-ksp-options
   "Build ksp-run options for a module config (or test variant).
   Returns nil when no KSP config."
@@ -571,6 +592,12 @@
                   :aliases              (:aliases ksp)
                   :ksp-aliases          (:ksp-aliases ksp)
                   :sdk-aliases          (:sdk-aliases ksp)
+                  :src-dirs             (if test?
+                                          (test-ksp-source-dirs module-config ksp)
+                                          (:src-dirs ksp))
+                  :extra-libraries      (if test?
+                                          (test-ksp-extra-libraries module-config ksp)
+                                          (:extra-libraries ksp))
                   :allow-unsafe?        (:allow-unsafe? ksp)
                   :extra-jvm-opts       (:extra-jvm-opts ksp)
                   :module-name          (or (:module-name ksp) module)
@@ -885,12 +912,15 @@
             :let [proc-module (get (:all-modules (first modules)) proc-name)]]
       (compile-module proc-module)
       (build-module proc-module))
-    ;; Run KSP for all modules
+    ;; Run KSP for all modules. Test KSP needs production classes available
+    ;; as libraries, so compile production first for modules with test processors.
     (doseq [m modules]
-      (when (:ksp m)
-        (run-module-ksp m false))
-      (when (:ksp-test m)
-        (run-module-ksp m true)))))
+      (if (:ksp-test m)
+        (do
+          (compile-module m)
+          (run-module-ksp m true))
+        (when (:ksp m)
+          (run-module-ksp m false))))))
 
 (defn package [args]
   (let [plugin-config (edn/read-string (slurp "plugin.edn"))

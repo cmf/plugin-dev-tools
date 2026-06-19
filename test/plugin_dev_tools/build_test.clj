@@ -67,6 +67,72 @@
                                          false)]
     (is (= "25" (:jvm-target opts)))))
 
+(deftest test-ksp-test-options-use-test-source-roots-and-production-libraries
+  (let [opts (#'build/module-ksp-options {:module "main"
+                                          :module-path "."
+                                          :depends ["dep"]
+                                          :jvm-target "25"
+                                          :kotlin-test-paths ["test/java" "test/kotlin" "test/generated"]
+                                          :java-test-paths ["test/java" "test/generated"]
+                                          :ksp-test {:processor-module "processor"}
+                                          :all-modules {"processor" {:module-path "processor"
+                                                                     :jar-file "processor/build/distributions/processor.jar"}}}
+                                         true)]
+    (is (= ["test/java" "test/kotlin"] (:src-dirs opts)))
+    (is (= ["out/production/main" "out/production/dep"] (:extra-libraries opts)))))
+
+(deftest test-ksp-run-uses-explicit-source-roots-and-appends-extra-libraries
+  (let [src-dir (fs/create-temp-dir {:prefix "ksp-src-"})
+        fallback-src-dir (fs/create-temp-dir {:prefix "ksp-fallback-src-"})
+        captured (atom nil)]
+    (try
+      (with-redefs [clojure.tools.build.api/create-basis (fn [{:keys [aliases]}]
+                                                           (if (some #{:ksp-plugin} aliases)
+                                                             {:libs {'tool {:paths ["ksp-tool.jar"]}}
+                                                              :classpath-roots []}
+                                                             {:libs {'lib {:paths ["library.jar"]}}
+                                                              :classpath-roots [(str fallback-src-dir)]}))
+                    clojure.tools.build.tasks.process/process (fn [args]
+                                                                (reset! captured args))]
+        (build/ksp-run {:processor-jar "processor.jar"
+                        :output-dir "generated/ksp"
+                        :src-dirs [(str src-dir)]
+                        :extra-libraries ["out/production/main"]
+                        :ksp-main nil})
+        (let [command-args (:command-args @captured)
+              arg-after (fn [arg]
+                          (second (drop-while #(not= arg %) command-args)))]
+          (is (= (str src-dir) (arg-after "-source-roots")))
+          (is (not (re-find (re-pattern (java.util.regex.Pattern/quote (str fallback-src-dir)))
+                            (arg-after "-source-roots"))))
+          (is (= (str "library.jar" java.io.File/pathSeparator "out/production/main")
+                 (arg-after "-libraries")))))
+      (finally
+        (fs/delete-tree src-dir)
+        (fs/delete-tree fallback-src-dir)))))
+
+(deftest test-generate-ksp-compiles-production-before-test-ksp
+  (let [calls (atom [])
+        processor {:module "processor"}
+        main {:module "main"
+              :ksp {:processor-module "processor"}
+              :ksp-test {:processor-module "processor"}}
+        modules [(assoc processor :all-modules {"processor" processor "main" main})
+                 (assoc main :all-modules {"processor" processor "main" main})]]
+    (with-redefs [build/module-info (fn [_] modules)
+                  build/compile-module (fn [module]
+                                         (swap! calls conj [:compile (:module module)]))
+                  build/build-module (fn [module]
+                                       (swap! calls conj [:build (:module module)]))
+                  build/run-module-ksp (fn [module test?]
+                                         (swap! calls conj [:ksp (:module module) test?]))]
+      (build/generate-ksp {})
+      (is (= [[:compile "processor"]
+              [:build "processor"]
+              [:compile "main"]
+              [:ksp "main" true]]
+             @calls)))))
+
 (deftest test-package-compiles-by-default
   (let [{:keys [compile clean]} (run-package {})]
     (is (= 1 clean))
