@@ -7,14 +7,18 @@
 (defn- run-package
   [args]
   (let [compile-calls (atom 0)
-        clean-calls (atom 0)
+        deleted-paths (atom [])
         slurp* clojure.core/slurp
         result (atom {})]
     (with-redefs [build/module-info (fn [_]
                                       [{:module "main"
+                                        :module-path "."
                                         :main-plugin? true
-                                        :plugin-directory "main-plugin"}])
-                  build/clean (fn [_] (swap! clean-calls inc))
+                                        :plugin-directory "main-plugin"
+                                        :ksp {:processor-module "processor"}
+                                        :ksp-test {:processor-module "processor"}}])
+                  clojure.tools.build.api/delete (fn [{:keys [path]}]
+                                                   (swap! deleted-paths conj path))
                   build/compile-module (fn [_] (swap! compile-calls inc))
                   build/sync-kotlinc-plugin (fn [] nil)
                   build/prepare-sandbox (fn [_] nil)
@@ -25,7 +29,7 @@
                                          (slurp* path)))]
       (build/package args)
       (reset! result {:compile @compile-calls
-                      :clean @clean-calls}))
+                      :deleted @deleted-paths}))
     @result))
 
 (deftest test-kotlinc-jvm-default-opt-uses-legacy-flag-before-kotlin-2-2
@@ -133,15 +137,35 @@
               [:ksp "main" true]]
              @calls)))))
 
-(deftest test-package-compiles-by-default
-  (let [{:keys [compile clean]} (run-package {})]
-    (is (= 1 clean))
-    (is (= 1 compile))))
+(deftest test-package-compiles-by-default-and-cleans-only-production
+  (let [{:keys [compile deleted]} (run-package {})]
+    (is (= 1 compile))
+    (is (some #{"out/production"} deleted))
+    (is (some #{"src/generated/ksp"} deleted))
+    (is (not (some #{"out/test"} deleted)))
+    (is (not (some #{"test/generated/ksp"} deleted)))))
 
-(deftest test-package-skips-compile-when-disabled
-  (let [{:keys [compile clean]} (run-package {:compile false})]
-    (is (= 0 clean))
-    (is (= 0 compile))))
+(deftest test-package-skips-compile-and-clean-when-disabled
+  (let [{:keys [compile deleted]} (run-package {:compile false})]
+    (is (= 0 compile))
+    (is (empty? deleted))))
+
+(deftest test-clean-cleans-production-and-test-outputs
+  (let [deleted-paths (atom [])]
+    (with-redefs [build/module-info (fn [_]
+                                      [{:module "main"
+                                        :module-path "."
+                                        :main-plugin? true
+                                        :plugin-directory "main-plugin"
+                                        :ksp {:processor-module "processor"}
+                                        :ksp-test {:processor-module "processor"}}])
+                  clojure.tools.build.api/delete (fn [{:keys [path]}]
+                                                   (swap! deleted-paths conj path))]
+      (build/clean {})
+      (is (some #{"out/production"} @deleted-paths))
+      (is (some #{"src/generated/ksp"} @deleted-paths))
+      (is (some #{"out/test"} @deleted-paths))
+      (is (some #{"test/generated/ksp"} @deleted-paths)))))
 
 (deftest test-clean-sandbox-deletes-entire-sandbox-root
   (let [delete-calls (atom [])

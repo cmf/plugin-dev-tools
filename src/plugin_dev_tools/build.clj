@@ -210,22 +210,27 @@
             ret)
           ret)))))
 
-(defn clean [args]
+(defn- clean*
+  [args tests?]
   (let [modules (module-info args)
         dir (plugin-directory modules)
         ksp-dirs (for [m modules
-                       suffix ["src/generated/ksp" "test/generated/ksp"]
-                       :when (or (:ksp m) (:ksp-test m))]
+                       suffix (cond-> ["src/generated/ksp"]
+                                tests? (conj "test/generated/ksp"))
+                       :when (get m (if (= suffix "test/generated/ksp") :ksp-test :ksp))]
                    (path-to m suffix))
-        dirs (into ["out/production"
-                    "out/test"
-                    "out/generated"
-                    "build-tools/build"
-                    (str "sandbox/plugins/" dir "/lib")]
+        dirs (into (cond-> ["out/production"
+                            "out/generated"
+                            "build-tools/build"
+                            (str "sandbox/plugins/" dir "/lib")]
+                     tests? (conj "out/test"))
                    (concat (map #(path-to % "build") modules)
                            ksp-dirs))]
     (doseq [path dirs]
       (api/delete {:path path}))))
+
+(defn clean [args]
+  (clean* args true))
 
 (defn clean-sandbox
   "Delete the entire sandbox root so the next launch starts from scratch.
@@ -927,7 +932,7 @@
         modules (module-info args)
         {:keys [compile] :or {compile true}} args]
     (when compile
-      (clean args)
+      (clean* args false)
       (run! compile-module modules))
     (sync-kotlinc-plugin)
     (prepare-sandbox args)
