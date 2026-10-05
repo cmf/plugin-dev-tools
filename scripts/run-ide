@@ -41,6 +41,10 @@ main_class="$(jq -r '.mainClass' <<<"$params_json")"
 required_major="$(jq -r '.javaRequirements.major // empty' <<<"$params_json")"
 require_jbr="$(jq -r '.javaRequirements.jbr // false' <<<"$params_json")"
 debug_port="$(jq -r '.debugPort // empty' <<<"$params_json")"
+managed_allocation="$(jq -r '.managedAllocationKind // empty' <<<"$params_json")"
+resource_slot="$(jq -r '.resourceSlot // empty' <<<"$params_json")"
+ide_repl_port="$(jq -r '.ideReplPort // empty' <<<"$params_json")"
+ide_http_port="$(jq -r '.ideHttpPort // empty' <<<"$params_json")"
 
 vm_args=()
 while IFS= read -r line; do
@@ -100,8 +104,18 @@ for entry in "${classpath_entries[@]}"; do
   fi
 done
 
-if [[ -n "$debug_port" ]]; then
-  echo "Debug port: $debug_port" >&2
+if [[ -n "$managed_allocation" ]]; then
+  allocation_identity="$managed_allocation"
+  if [[ -n "$resource_slot" ]]; then
+    allocation_identity="$allocation_identity slot $resource_slot"
+  fi
+  echo "Managed IDE allocation: $allocation_identity" >&2
+  echo "Selected IDE REPL endpoint: 127.0.0.1:$ide_repl_port" >&2
+  echo "Selected IDE debug endpoint: 127.0.0.1:$debug_port" >&2
+  echo "Selected IDE HTTP/RPC endpoint: 127.0.0.1:$ide_http_port" >&2
+  echo "Selected endpoints are not readiness; wait for the IDE services themselves." >&2
+elif [[ -n "$debug_port" ]]; then
+  echo "Debug port: 127.0.0.1:$debug_port" >&2
 fi
 
 cd "$cwd"

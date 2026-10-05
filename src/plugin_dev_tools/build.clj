@@ -12,7 +12,8 @@
             [clojure.tools.build.util.zip :as zip]
             [plugin-dev-tools.testing :as testing])
   (:import (java.io File FileOutputStream)
-           (java.net ServerSocket URL URLClassLoader)
+           (java.net InetAddress InetSocketAddress ServerSocket URL URLClassLoader)
+           (java.nio.charset StandardCharsets)
            (java.time LocalDateTime)
            (java.time.format DateTimeFormatter)
            (java.util.zip ZipOutputStream)
@@ -991,7 +992,8 @@
       parsed-port)))
 
 (defn- ide-jvm-args
-  [{:keys [intellij-sdk sandbox-dir plugin-id launch-config current-os debug-port]}]
+  [{:keys [intellij-sdk sandbox-dir plugin-id launch-config current-os debug-port
+           managed-allocation workspace-root]}]
   (let [vm-opts-path (when-let [path (:vmOptionsFilePath launch-config)]
                        (str intellij-sdk "/" path))
         vm-opts (or (testing/load-vm-options vm-opts-path) [])
@@ -1009,9 +1011,14 @@
                    (str "-Didea.system.path=" sandbox-dir "/system")
                    (str "-Didea.log.path=" sandbox-dir "/system/log")
                    (str "-Didea.required.plugins.id=" plugin-id)
+                   (str "-Dcursive.workspace.root=" workspace-root)
                    "-Didea.auto.reload.plugins=true"
                    "-Dide.native.launcher=false"
                    "-Djava.system.class.loader=com.intellij.util.lang.PathClassLoader"]
+        managed-props (when managed-allocation
+                        ["-Dide.repl.server.address=127.0.0.1"
+                         (str "-Dide.repl.server.port=" (:repl-port managed-allocation))
+                         (str "-Drpc.port=" (:http-port managed-allocation))])
         platform-props (case current-os
                          "macOS" ["-Didea.smooth.progress=false"
                                    "-Dapple.laf.useScreenMenuBar=true"
@@ -1019,10 +1026,12 @@
                          "Linux" ["-Dsun.awt.disablegrab=true"]
                          [])
         debug-arg (when debug-port
-                    (str "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:" debug-port))]
+                    (str "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address="
+                         (if managed-allocation "127.0.0.1" "*") ":" debug-port))]
     (concat vm-opts
             launch-jvm-args
             ide-props
+            managed-props
             platform-props
             (when debug-arg [debug-arg]))))
 
@@ -1059,11 +1068,105 @@
                         project-path)]
       (str (fs/path project-dir ".sandbox")))))
 
+(defn- canonical-path
+  [path]
+  (.getCanonicalPath (io/file path)))
+
 (defn- resolve-sandbox-dir
-  [args]
-  (absolute-path (or (:sandbox-dir args)
-                     (project-sandbox-dir (:project-path args))
-                     "sandbox")))
+  [args managed? workspace-root current-os]
+  (let [explicit? (contains? args :sandbox-dir)
+        managed-sandbox-dir (str (fs/path workspace-root "sandbox"))
+        canonical-managed-sandbox-dir (canonical-path managed-sandbox-dir)
+        explicit-sandbox-dir (some-> (:sandbox-dir args) canonical-path)
+        sandbox-dir (if managed?
+                      managed-sandbox-dir
+                      (absolute-path (or (:sandbox-dir args)
+                                         (project-sandbox-dir (:project-path args))
+                                         "sandbox")))]
+    (when (and managed? explicit? (not= explicit-sandbox-dir canonical-managed-sandbox-dir))
+      (throw (ex-info "Managed IDE :sandbox-dir must be exactly <checkout>/sandbox"
+                      {:sandbox-dir explicit-sandbox-dir
+                       :required-sandbox-dir managed-sandbox-dir
+                       :checkout workspace-root})))
+    (when (and managed? (contains? #{"macOS" "Linux"} current-os))
+      (let [socket-path (canonical-path (fs/path sandbox-dir "system" ".port"))
+            path-bytes (alength (.getBytes socket-path StandardCharsets/UTF_8))
+            ;; DirectoryLock redirects paths longer than 100 characters to /tmp,
+            ;; outside the reviewed socket-directory grant. A 100-byte cap also
+            ;; stays below the macOS/Linux native pathname limits.
+            max-path-bytes 100]
+        (when (> path-bytes max-path-bytes)
+          (throw (ex-info (str "Managed IDE Unix socket path is " path-bytes " bytes; "
+                               "keep it at most " max-path-bytes " to avoid IntelliJ's /tmp redirection. "
+                               "Use a shorter checkout path.")
+                          {:unix-socket-path socket-path
+                           :path-bytes path-bytes
+                           :max-path-bytes max-path-bytes
+                           :os current-os})))))
+    sandbox-dir))
+
+(def ^:private managed-ide-env-vars
+  ["AGENT_RESOURCE_ALLOCATION_KIND"
+   "AGENT_RESOURCE_SLOT"
+   "AGENT_RESOURCE_IDE_REPL_PORT"
+   "AGENT_RESOURCE_IDE_DEBUG_PORT"
+   "AGENT_RESOURCE_IDE_HTTP_PORT"])
+
+(defn- parse-managed-port
+  [env name]
+  (let [value (get env name)
+        port (when (and value (re-matches #"[0-9]+" value))
+               (try
+                 (Integer/parseInt value)
+                 (catch NumberFormatException _ nil)))]
+    (when-not (and port (<= 1 port 65535))
+      (throw (ex-info (str name " is required and must be an integer in range 1-65535")
+                      {:environment-variable name :value value})))
+    port))
+
+(defn- managed-ide-allocation
+  []
+  (let [env (select-keys (System/getenv) managed-ide-env-vars)]
+    (when (seq env)
+      (let [kind (get env "AGENT_RESOURCE_ALLOCATION_KIND")
+            slot (get env "AGENT_RESOURCE_SLOT")]
+        (when-not (contains? #{"workflow-slot" "ad-hoc"} kind)
+          (throw (ex-info "AGENT_RESOURCE_ALLOCATION_KIND must be workflow-slot or ad-hoc"
+                          {:allocation-kind kind})))
+        (case kind
+          "workflow-slot"
+          (when-not (and slot (re-matches #"[0-3]" slot))
+            (throw (ex-info "Workflow allocation requires AGENT_RESOURCE_SLOT in range 0..3"
+                            {:resource-slot slot})))
+
+          "ad-hoc"
+          (when (some? slot)
+            (throw (ex-info "Ad-hoc allocation must not supply AGENT_RESOURCE_SLOT"
+                            {:resource-slot slot}))))
+        (let [allocation {:kind       kind
+                          :slot       slot
+                          :repl-port  (parse-managed-port env "AGENT_RESOURCE_IDE_REPL_PORT")
+                          :debug-port (parse-managed-port env "AGENT_RESOURCE_IDE_DEBUG_PORT")
+                          :http-port  (parse-managed-port env "AGENT_RESOURCE_IDE_HTTP_PORT")}]
+          (when-not (apply distinct? (map allocation [:repl-port :debug-port :http-port]))
+            (throw (ex-info "Managed IDE REPL, debug, and HTTP ports must be distinct"
+                            (select-keys allocation [:repl-port :debug-port :http-port]))))
+          allocation)))))
+
+(defn- preflight-loopback-ports!
+  [allocation]
+  (doseq [[endpoint port] [[:repl (:repl-port allocation)]
+                           [:debug (:debug-port allocation)]
+                           [:http (:http-port allocation)]]]
+    (try
+      (with-open [socket (ServerSocket.)]
+        (.setReuseAddress socket true)
+        (.bind socket (InetSocketAddress. (InetAddress/getByName "127.0.0.1") port)))
+      (catch Exception e
+        (throw (ex-info (str "Managed IDE " (name endpoint) " port 127.0.0.1:" port
+                             " is unavailable; refusing to launch")
+                        {:endpoint endpoint :address "127.0.0.1" :port port}
+                        e))))))
 
 (defn- app-arg-vector
   [app-args]
@@ -1092,8 +1195,17 @@
 
 (defn- ide-launch-params
   [args]
-  (let [modules (module-info args)
-        sandbox-dir (resolve-sandbox-dir args)
+  (let [workspace-root (canonical-path ".")
+        managed-allocation (try
+                             (managed-ide-allocation)
+                             (catch Exception e
+                               (fail! (.getMessage e))))
+        modules (module-info args)
+        current-os (testing/detect-os)
+        sandbox-dir (try
+                      (resolve-sandbox-dir args (boolean managed-allocation) workspace-root current-os)
+                      (catch Exception e
+                        (fail! (.getMessage e))))
         intellij-sdk (some-> (testing/find-intellij-sdk) absolute-path)
         _ (when-not intellij-sdk
             (fail! "Could not find IntelliJ SDK path in deps.edn"))
@@ -1101,18 +1213,26 @@
         _ (when-not plugin-id
             (fail! ":plugin-id not found in plugin.edn"))
         product-info (testing/read-product-info intellij-sdk)
-        current-os (testing/detect-os)
         current-arch (testing/detect-architecture)
         launch-config (testing/find-launch-config product-info current-os current-arch)
         _ (when-not launch-config
             (fail! (str "Could not find launch configuration for " current-os " " current-arch)))
-        debug-port (try
-                     (resolve-debug-port args)
-                     (catch Exception e
-                       (fail! (.getMessage e))))
+        debug-port (if managed-allocation
+                     (:debug-port managed-allocation)
+                     (try
+                       (resolve-debug-port args)
+                       (catch Exception e
+                         (fail! (.getMessage e)))))
         launch-jvm-target (or (product-info-jvm-target product-info)
                               (some :jvm-target modules)
                               default-jvm-target)]
+
+    (when managed-allocation
+      (try
+        (preflight-loopback-ports! managed-allocation)
+        (catch Exception e
+          (fail! (.getMessage e))))
+      (println "Initial managed IDE port preflight passed; this point-in-time check is not IDE readiness."))
 
     (println "Compiling modules...")
     (run! compile-module modules)
@@ -1120,15 +1240,24 @@
     (testing/ensure-sandbox! sandbox-dir)
     (prepare-sandbox {:sandbox-dir sandbox-dir})
 
+    (when managed-allocation
+      (try
+        (preflight-loopback-ports! managed-allocation)
+        (catch Exception e
+          (fail! (.getMessage e))))
+      (println "Final managed IDE port preflight passed; this point-in-time check is not IDE readiness."))
+
     (println "Using IntelliJ SDK:" intellij-sdk)
 
     (let [java-exec (testing/find-java-exec intellij-sdk)
-          jvm-args (vec (ide-jvm-args {:intellij-sdk  intellij-sdk
-                                       :sandbox-dir   sandbox-dir
-                                       :plugin-id     plugin-id
-                                       :launch-config launch-config
-                                       :current-os    current-os
-                                       :debug-port    debug-port}))
+          jvm-args (vec (ide-jvm-args {:intellij-sdk       intellij-sdk
+                                       :sandbox-dir        sandbox-dir
+                                       :plugin-id          plugin-id
+                                       :launch-config      launch-config
+                                       :current-os         current-os
+                                       :debug-port         debug-port
+                                       :managed-allocation managed-allocation
+                                       :workspace-root     workspace-root}))
           classpath-entries (ide-classpath-entries intellij-sdk launch-config)
           main-class (or (:mainClass launch-config) "com.intellij.idea.Main")
           bin-dir (str intellij-sdk "/bin")]
@@ -1141,18 +1270,27 @@
                :vmArgs jvm-args
                :classpathEntries classpath-entries
                :appArgs (ide-app-args args)}
-        debug-port (assoc :debugPort debug-port)))))
+        debug-port (assoc :debugPort debug-port)
+        managed-allocation (assoc :managedAllocationKind (:kind managed-allocation)
+                                  :ideReplPort (:repl-port managed-allocation)
+                                  :ideHttpPort (:http-port managed-allocation)
+                                  :workspaceRoot workspace-root)
+        (:slot managed-allocation) (assoc :resourceSlot (:slot managed-allocation))))))
 
 (defn ide-params
   "Print IDE launch parameters as JSON.
 
    Options from args:
-   - :sandbox-dir              Sandbox dir (default \"sandbox\")
-   - :project-path             Optional project/file path to open on startup; defaults sandbox to <project>/.sandbox
+   - :sandbox-dir              Sandbox dir (default \"sandbox\"); managed launches require exactly <checkout>/sandbox
+   - :project-path             Optional project/file path to open on startup; outside managed launches defaults sandbox to <project>/.sandbox
    - :dont-reopen-projects?    Optional flag to pass dontReopenProjects launcher arg (defaults true when :project-path is set)
    - :app-args                 Optional extra launcher args appended after :project-path
    - :debug                    Optional flag to add JDWP debug JVM argument
    - :debug-port               Optional debug port (alias: :port); if omitted and :debug is true, auto-selects a free port.
+
+   When AGENT_RESOURCE_ALLOCATION_KIND is workflow-slot or ad-hoc, the three
+   AGENT_RESOURCE_IDE_*_PORT values are required and override IDE endpoint defaults.
+   Managed launches always enable loopback JDWP and use the checkout-local sandbox.
 
    Compiles all modules, prepares sandbox, then prints JSON launch parameters to stdout."
   [args]

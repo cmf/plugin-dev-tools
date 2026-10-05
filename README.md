@@ -54,6 +54,8 @@ library (`plugin-dev-tools.build`).
   startup; when `:sandbox-dir` is omitted, this uses `<project>/.sandbox` so each manual test
   project gets its own IDE config/system paths. `:project-path` also passes `dontReopenProjects`
   by default; use `:dont-reopen-projects? false` to keep previous project reopening behavior.
+  Resource-managed launches always use exactly `<checkout>/sandbox`; alternate `:sandbox-dir`
+  values are rejected so the sandbox matches the reviewed Unix-socket directory grant.
 
 ## Notes
 - This repo is meant for Kotlin/Java IntelliJ plugins; it does not help write
