@@ -10,3 +10,4 @@ test/fixtures
 /test-project/.clj-kondo/.cache
 /test-project/.clj-kondo/imports
 /sdks
+/investigations/

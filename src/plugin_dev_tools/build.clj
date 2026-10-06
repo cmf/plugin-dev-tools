@@ -1070,7 +1070,7 @@
 
 (defn- canonical-path
   [path]
-  (.getCanonicalPath (io/file path)))
+  (.getCanonicalPath (fs/file path)))
 
 (defn- resolve-sandbox-dir
   [args managed? workspace-root current-os]
